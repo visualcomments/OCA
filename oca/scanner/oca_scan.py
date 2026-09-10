@@ -203,9 +203,45 @@ def scan(root: Path) -> dict:
     readme_path = next((flat[p] for p in top if README_RE.match(p)), None)
     readme_chars = len(read_text(readme_path)) if readme_path else 0
 
-    # licenses
+    # ── licenses ────────────────────────────────────────────────────────────
+    # Real courses name licence files in several ways, and the strict
+    # `^LICENSE$` match produced a false BLOCKER on courses that license
+    # things BETTER than average:
+    #   flutter-mipt   LICENSE-code.md + LICENSE-text.md   (split by asset type)
+    #   scireason      LICENSE + LICENSE_SCOPE.md + LICENSES/GPL-3.0-or-later.txt
+    #   deep-vision    LICENSE + vendored per-model licences
+    # So detection is: any top-level name containing a licence keyword, plus
+    # licence directories, plus a scan one level deep for licence text.
+    LICENSE_ANY_RE = re.compile(
+        r"(^|[-_.])(licen[cs]e|copying|copyright|notice)([-_.]|$)", re.IGNORECASE)
+    LICENSE_DIR_RE = re.compile(r"^(licen[cs]es?|legal)$", re.IGNORECASE)
+
     license_files = [p for p in top if LICENSE_RE.match(p)]
+    # derived names at the root: LICENSE-code.md, LICENSE_SCOPE.md, ...
+    derived = [p for p in top if p not in license_files and LICENSE_ANY_RE.search(p)]
+    # licence directories and their contents (LICENSES/GPL-3.0-or-later.txt)
+    license_dirs = [p for p in top if (root / p).is_dir() and LICENSE_DIR_RE.match(p)]
+    in_license_dir: list[str] = []
+    for d in license_dirs:
+        in_license_dir += [q for q in flat if q.startswith(d + "/") and "/" not in q[len(d) + 1:]]
+
+    # Split out the subset that speaks about CONTENT (text, slides, docs)
+    # versus code, so the two axes can be scored separately.
     content_license = [p for p in top if CONTENT_LICENSE_RE.search(p)]
+    # A single scope file can cover content too; detect it by reading, not by
+    # guessing from the name.
+    for p in derived + in_license_dir:
+        if p in content_license:
+            continue
+        body = read_text(flat[p], limit=6000).lower()
+        if any(k in body for k in ("creative commons", "cc by", "cc-by",
+                                   "educational materials", "учебн", "text and",
+                                   "slides", "контент", "материал")):
+            content_license.append(p)
+
+    # Anything that actually grants a licence counts for the licence axis,
+    # whatever it is called.
+    all_license_artifacts = license_files + derived + in_license_dir
 
     # syllabus
     syllabus_rel = next((p for p in flat if SYLLABUS_RE.match(Path(p).name)), None)
@@ -401,8 +437,17 @@ def scan(root: Path) -> dict:
     elif readme_chars < 200:
         add("MAJOR", "thin-readme", f"README слишком короткий ({readme_chars} символов)", readme_path)
 
-    if not license_files:
+    if not all_license_artifacts:
         add("BLOCKER", "no-license", "Нет файла LICENSE в корне")
+    elif not license_files and not in_license_dir:
+        # Recorded as informational rather than a blocker: the course does
+        # grant a licence, it just names it unconventionally. `flutter-mipt`
+        # split code/text licences deliberately — that is better practice
+        # than one blanket file, not a defect.
+        add("MINOR", "nonstandard-license-name",
+            "Лицензия есть, но под нестандартным именем: "
+            + ", ".join(all_license_artifacts[:4])
+            + " — стоит добавить канонический LICENSE для распознавания инструментами")
     if not content_license:
         add("MINOR", "no-content-license",
             "Не найдена отдельная лицензия для учебного контента (текст/слайды)")
@@ -509,8 +554,10 @@ def scan(root: Path) -> dict:
         + 0.25 * (1 if ci_files else 0)
         + 0.20 * (1 - ratio(sum(1 for i in notebooks.values() if i.get("issues")), max(len(notebooks), 0) or 1))
     )
+    # Licensing rewards the substance, not the filename: any recognisable
+    # licence artefact earns the base score, the canonical name earns full.
     licensing = 5 * (
-        0.50 * (1 if license_files else 0)
+        0.50 * (1 if license_files else (0.8 if all_license_artifacts else 0))
         + 0.30 * (1 if content_license else 0)
         + 0.20 * (1 if corpus_files else 0)
     )
@@ -552,6 +599,8 @@ def scan(root: Path) -> dict:
             "readme": readme_path,
             "readme_chars": readme_chars,
             "license_files": license_files,
+            "license_derived": derived,
+            "license_dirs": license_dirs,
             "content_license": content_license,
             "syllabus": syllabus_path,
             "syllabus_json": syllabus_json,
@@ -729,6 +778,10 @@ def render_text(r: dict) -> str:
     L.append("Артефакты:")
     L.append(f"  README            : {a['readme'] or '— ОТСУТСТВУЕТ'} ({a['readme_chars']} симв.)")
     L.append(f"  LICENSE           : {', '.join(a['license_files']) or '— ОТСУТСТВУЕТ'}")
+    if a.get("license_derived") or a.get("license_dirs"):
+        extra = (a.get("license_derived") or []) + [
+            d + "/" for d in (a.get("license_dirs") or [])]
+        L.append(f"  Прочие лицензии   : {', '.join(extra)}")
     L.append(f"  Лицензия контента : {', '.join(a['content_license']) or '— не найдена'}")
     L.append(f"  Syllabus          : {a['syllabus'] or '— ОТСУТСТВУЕТ'}")
     L.append(f"  Окружение         : {', '.join(a['environment']) or '— нет'}")

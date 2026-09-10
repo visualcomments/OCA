@@ -162,6 +162,71 @@ def main() -> int:
           abs(a["scores"]["overall"] - 3.08) < 0.02,
           f"got {a['scores']['overall']}")
 
+    # ── 11. licence detection beyond the canonical name ────────────────────
+    print("\n[licence naming variants]")
+
+    def licence_case(name: str, files: dict[str, str]) -> dict:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "README.md").write_text("# Курс\n\n" + "описание. " * 40, encoding="utf-8")
+            (root / "lectures").mkdir()
+            (root / "lectures" / "01_t.md").write_text("# Тема\n\n## Задания\n\nРешить.\n",
+                                                       encoding="utf-8")
+            for rel, body in files.items():
+                p = root / rel
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text(body, encoding="utf-8")
+            return oca_scan.scan(root)
+
+    def codes(r: dict) -> list[str]:
+        return [f["code"] for f in r["findings"] if "licen" in f["code"]]
+
+    # flutter-mipt: split code/text licences, no plain LICENSE
+    r = licence_case("split", {
+        "LICENSE-code.md": "# Лицензия на код\n\nMIT\n",
+        "LICENSE-text.md": "# Лицензия на текст\n\nCreative Commons CC BY-SA 4.0\n",
+    })
+    check("split licence files are not a BLOCKER",
+          "no-license" not in codes(r), str(codes(r)))
+    check("unconventional name is reported as informational",
+          "nonstandard-license-name" in codes(r), str(codes(r)))
+    check("text licence recognised as content licence",
+          "no-content-license" not in codes(r), str(codes(r)))
+
+    # scireason: LICENSE + LICENSE_SCOPE.md + LICENSES/*.txt
+    r = licence_case("scope", {
+        "LICENSE": "GNU GENERAL PUBLIC LICENSE Version 3\n",
+        "LICENSE_SCOPE.md": "# License scope\n\nApplies to course plans, assignments, "
+                            "rubrics, teaching notes and other educational materials.\n",
+        "LICENSES/GPL-3.0-or-later.txt": "GNU GENERAL PUBLIC LICENSE Version 3\n",
+    })
+    check("licence directory is recognised",
+          "no-license" not in codes(r), str(codes(r)))
+    check("scope file counts as content licence",
+          "no-content-license" not in codes(r), str(codes(r)))
+    check("canonical LICENSE earns the full licence-and-content weight",
+          # 0.50 (canonical LICENSE) + 0.30 (content licence) = 0.80 of 5 = 4.0.
+          # The remaining 0.20 is the corpus/provenance artefact, absent here.
+          abs(r["scores"]["axes"]["licensing"] - 4.0) < 0.01,
+          f"got {r['scores']['axes']['licensing']}")
+    check("split names score below a canonical file but well above zero",
+          3.0 < licence_case("split2", {
+              "LICENSE-code.md": "MIT\n",
+              "LICENSE-text.md": "Creative Commons CC BY-SA 4.0\n",
+          })["scores"]["axes"]["licensing"] < 4.0,
+          "unexpected split-licence score")
+
+    # A course with genuinely no licence must still be blocked.
+    r = licence_case("none", {"notes.txt": "hello\n"})
+    check("no licence at all is still a BLOCKER",
+          "no-license" in codes(r), str(codes(r)))
+
+    # A file that merely contains the word must not count.
+    r = licence_case("false-positive", {"LICENSE_PLACEHOLDER.txt": "TODO\n"})
+    check("bare placeholder is not mistaken for a granted licence",
+          r["scores"]["axes"]["licensing"] < 5.0,
+          f"got {r['scores']['axes']['licensing']}")
+
     print(f"\n{_passed} passed, {len(_failures)} failed")
     if _failures:
         for f in _failures:
