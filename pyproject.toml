@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "oca-tool"
+version = "0.1.0"
+description = "OCA — Open Course Advisor: audit and improve open educational course repositories"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "GPL-3.0-or-later" }
+authors = [{ name = "OCA contributors" }]
+keywords = ["education", "open-education", "course", "audit", "llm", "repository-analysis"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Education",
+  "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+  "Programming Language :: Python :: 3",
+  "Topic :: Education",
+  "Topic :: Software Development :: Quality Assurance",
+]
+dependencies = []
+
+[project.optional-dependencies]
+# Only needed to *parse* notebooks and documents more deeply than the scanner's
+# built-in JSON reader; the scanner itself has no third-party dependencies.
+docs = ["nbformat>=5.0", "pdfplumber>=0.11.0", "python-pptx>=1.0", "python-docx>=1.1"]
+
+[project.urls]
+Homepage = "https://github.com/visualcomments/OCA"
+Repository = "https://github.com/visualcomments/OCA"
+Issues = "https://github.com/visualcomments/OCA/issues"
+
+[project.scripts]
+oca = "oca.cli:main"
+
+[tool.setuptools]
+packages = ["oca", "oca.scanner"]
+
+[tool.setuptools.package-data]
+oca = ["templates/*"]

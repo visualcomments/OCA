@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: test (python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install package
+        run: pip install -e .
+
+      - name: Regression suite
+        run: python tests/test_scanner.py
+
+      - name: Scanner is deterministic on its own fixtures
+        run: |
+          python -m oca.cli scan tests/fixtures/numbered-md --json -o /tmp/a.json
+          python -m oca.cli scan tests/fixtures/numbered-md --json -o /tmp/b.json
+          diff /tmp/a.json /tmp/b.json && echo "deterministic: OK"
+
+      - name: Scanner rejects a bad path with a non-zero exit
+        run: |
+          if python -m oca.cli scan /nonexistent/oca-path; then
+            echo "::error::scanner accepted a nonexistent path"; exit 1
+          else
+            echo "bad path rejected: OK"
+          fi
+
+      - name: CLI smoke test
+        run: |
+          python -m oca.cli --version
+          python -m oca.cli templates | head
+          python -m oca.cli report tests/fixtures/numbered-md -o /tmp/report.md
+          test -s /tmp/report.md && echo "report generated: OK"
