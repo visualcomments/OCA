@@ -7,6 +7,60 @@ OCA — аналог [OSA (Open-Source Advisor)](https://github.com/aimclub/OSA)
 есть ли программа, можно ли воспроизвести окружение, разрешено ли
 использовать материалы, готов ли курс к работе с AI-агентом.
 
+## Архитектура
+
+```
+oca/
+├── scanner/
+│   ├── oca_scan.py          # ядро сканера (сбор фактов, оси, оценки)
+│   ├── oca_diff.py          # сравнение двух сканов
+│   └── checkers/            # подключаемые чекеры
+│       ├── __init__.py      # интерфейс ScanContext, Finding, автообнаружение
+│       ├── dependencies.py  # анализ зависимостей (версии, wildcard, editable)
+│       ├── ci_analysis.py   # анализ CI/CD (unpinned actions, инъекции, тесты)
+│       └── testing.py       # наличие тестов и фреймворков
+├── cli.py                   # командная строка (scan, diff, report, linkcheck)
+├── linkcheck.py             # проверка внешних ссылок (опционально, с кэшем)
+├── config.py                # конфигурация через .oca.yml
+└── templates/               # шаблоны артефактов
+```
+
+### Расширяемость через чекеры
+
+Добавление новой проверки **не требует изменения `oca_scan.py`**:
+
+1. Создайте `oca/scanner/checkers/my_checker.py`
+2. Определите `CHECKS` (список `FindingSpec`) и `check(ctx: ScanContext) -> list[Finding]`
+3. Чекер обнаруживается автоматически при следующем запуске
+
+Каждый чекер получает `ScanContext` — неизменяемый снимок всех собранных
+фактов. Чекеры не обращаются к файловой системе напрямую и не используют
+сеть, что сохраняет детерминизм.
+
+### Конфигурация
+
+Создайте `.oca.yml` в корне курса:
+
+```yaml
+lesson_target: 4           # для коротких воркшопов
+disabled_checkers:         # отключить конкретные проверки
+  - testing
+weights:                   # свои веса осей (сумма = 1.0)
+  structure: 0.30
+  content: 0.20
+  practice: 0.20
+  reproducibility: 0.15
+  licensing: 0.10
+  agent_readiness: 0.05
+```
+
+### Сканирование по URL
+
+```bash
+oca scan https://github.com/user/course     # клонирует и сканирует
+oca report https://github.com/user/course   # то же + генерирует отчёт
+```
+
 ```
 overall=3.93  axes={'structure': 4.0, 'content': 4.3, 'practice': 4.06,
                     'reproducibility': 2.75, 'licensing': 3.5,

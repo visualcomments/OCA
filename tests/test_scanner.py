@@ -492,6 +492,68 @@ def main() -> int:
               == json.dumps(second, sort_keys=True, default=str),
               "findings differ between two scans")
 
+    # ── 17. pluggable checkers ─────────────────────────────────────────────
+    print("\n[pluggable checkers]")
+
+    def checker_case(files: dict[str, str]) -> list[dict]:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "README.md").write_text("# Курс\n\n" + "описание. " * 40, encoding="utf-8")
+            for rel, body in files.items():
+                p = root / rel
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text(body, encoding="utf-8")
+            r = oca_scan.scan(root)
+            return r["findings"]
+
+    # Dependencies checker
+    findings = checker_case({"requirements.txt": "numpy\npandas\nscipy\n"})
+    dep_codes = [f["code"] for f in findings if f["code"].startswith("dep-")]
+    check("unpinned deps are flagged", "dep-unpinned" in dep_codes, str(dep_codes))
+
+    findings = checker_case({"requirements.txt": "numpy==1.26.4\npandas==2.2.0\n"})
+    dep_codes = [f["code"] for f in findings if f["code"].startswith("dep-")]
+    check("fully pinned deps produce no dep findings", not dep_codes, str(dep_codes))
+
+    # CI checker
+    workflow = ("name: CI\non: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n"
+                "    steps:\n      - uses: actions/checkout@main\n      - run: echo hello\n")
+    findings = checker_case({".github/workflows/ci.yml": workflow})
+    ci_codes = [f["code"] for f in findings if f["code"].startswith("ci-")]
+    check("unpinned action is flagged", "ci-unpinned-action" in ci_codes, str(ci_codes))
+    check("CI without tests is flagged", "ci-no-tests" in ci_codes, str(ci_codes))
+
+    # Testing checker
+    findings = checker_case({"src/main.py": "print('hello')\n"})
+    test_codes = [f["code"] for f in findings if f["code"].startswith("no-tests")]
+    check("code without tests is flagged", bool(test_codes), str(test_codes))
+
+    findings = checker_case({
+        "src/main.py": "print('hello')\n",
+        "tests/test_main.py": "import pytest\ndef test_x(): pass\n",
+    })
+    test_codes = [f["code"] for f in findings if f["code"] == "no-tests"]
+    check("code with tests is not flagged", not test_codes, str(test_codes))
+
+    # ── 18. configuration ──────────────────────────────────────────────────
+    print("\n[configuration]")
+    from oca.config import load_config
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        cfg = load_config(root)
+        check("defaults are used when no config exists",
+              cfg["lesson_target"] == 8, str(cfg["lesson_target"]))
+
+        (root / ".oca.yml").write_text(
+            "lesson_target: 4\ndisabled_checkers:\n  - testing\n",
+            encoding="utf-8")
+        cfg = load_config(root)
+        check("custom lesson_target is loaded",
+              cfg["lesson_target"] == 4, str(cfg["lesson_target"]))
+        check("disabled_checkers is loaded",
+              "testing" in cfg["disabled_checkers"], str(cfg["disabled_checkers"]))
+
     print(f"\n{_passed} passed, {len(_failures)} failed")
     if _failures:
         for f in _failures:

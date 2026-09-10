@@ -107,7 +107,7 @@ def walk_files(root: Path) -> list[Path]:
     out: list[Path] = []
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = sorted(d for d in dirnames
-                             if d not in SKIP_DIRS and not d.startswith(".git"))
+                             if d not in SKIP_DIRS and d != ".git")
         for name in sorted(filenames):
             out.append(Path(dirpath) / name)
     return out
@@ -727,6 +727,38 @@ def scan(root: Path) -> dict:
         add("MINOR", "no-agents-md", "Нет AGENTS.md — курс не готов к работе агента")
     if not syllabus_json:
         add("MINOR", "no-machine-syllabus", "Нет syllabus.json — программа не машиночитаема")
+
+    # ── pluggable checkers ────────────────────────────────────────────────────
+    # Run every registered checker against the collected context. Checkers
+    # extend the scanner without modifying this file: drop a new module into
+    # oca/scanner/checkers/ and it is discovered automatically.
+    from oca.scanner.checkers import ScanContext, discover_checkers
+
+    ctx = ScanContext(
+        root=root, flat=flat, top=top,
+        readme_path=readme_path, readme_chars=readme_chars,
+        license_files=license_files, license_derived=derived,
+        license_dirs=license_dirs, content_license=content_license,
+        syllabus_path=syllabus_path, env_files=env_files,
+        build_files=build_files, ci_files=ci_files,
+        corpus_files=corpus_files, verify_files=verify_files,
+        agent_files=agent_files, tool_dirs=tool_dirs,
+        mirror_dirs=mirror_dirs, syllabus_json=syllabus_json,
+        lesson_paths=lesson_paths, lesson_detail=lecture_detail,
+        notebooks=notebooks, links=links,
+        git_repo=git_repo, git_commits=git_commit_count(root) if git_repo else None,
+        counts={"files": len(files), "lectures": len(lecture_files),
+                "notebooks": len(nb_paths),
+                "markdown": sum(1 for p in flat if p.endswith(".md"))},
+    )
+    for checker_mod in discover_checkers():
+        try:
+            for f in checker_mod.check(ctx):
+                add(f.level, f.code, f.message, f.path)
+        except Exception as e:
+            # A broken checker must not kill the scan. Log and continue.
+            add("MINOR", "checker-error",
+                f"Чекер {checker_mod.__name__} завершился с ошибкой: {e}")
 
     # ── axis scores (0-5), deterministic part only ──────────────────────────
     def ratio(num: int, den: int) -> float:

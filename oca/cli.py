@@ -1,11 +1,13 @@
 """OCA command-line interface.
 
-    oca scan   <repo> [--json] [--quiet]
+    oca scan   <repo|url> [--json] [--quiet]
     oca diff   <before.json> <after.json>
-    oca report <repo> [-o oca-report.md]
+    oca report <repo|url> [-o oca-report.md]
+    oca linkcheck <repo> [--offline]
     oca list-templates
 
 The CLI is a thin wrapper: all real work happens in ``oca.scanner``.
+URLs are cloned into a temporary directory and scanned locally.
 """
 
 from __future__ import annotations
@@ -13,7 +15,9 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 from oca import __version__
@@ -23,33 +27,63 @@ from oca.scanner.oca_scan import IMPACT_LABELS, EFFORT_LABELS
 TEMPLATE_DIR = Path(__file__).resolve().parent / "templates"
 
 
+def _resolve_path(path_str: str) -> tuple[Path, str | None]:
+    """Resolve a path or URL to a local directory.
+
+    Returns (local_path, temp_dir_to_cleanup). If the input is a URL,
+    clones into a temp dir and returns that. Otherwise returns the
+    resolved local path with no cleanup needed.
+    """
+    if path_str.startswith(("http://", "https://", "git@")):
+        tmp = tempfile.mkdtemp(prefix="oca-")
+        url = path_str
+        # Extract repo name for the clone target
+        repo_name = url.rstrip("/").split("/")[-1]
+        if repo_name.endswith(".git"):
+            repo_name = repo_name[:-4]
+        target = Path(tmp) / repo_name
+        try:
+            subprocess.run(
+                ["git", "clone", "--depth=1", "--quiet", url, str(target)],
+                check=True, capture_output=True, timeout=300)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+            shutil.rmtree(tmp, ignore_errors=True)
+            raise RuntimeError(f"Не удалось клонировать {url}: {e}") from e
+        return target, tmp
+    return Path(path_str).expanduser().resolve(), None
+
+
 def _cmd_scan(args: argparse.Namespace) -> int:
-    root = Path(args.path).expanduser().resolve()
-    if not root.is_dir():
-        print(f"oca: {root} is not a directory", file=sys.stderr)
-        return 2
+    root, cleanup = _resolve_path(args.path)
+    try:
+        if not root.is_dir():
+            print(f"oca: {root} is not a directory", file=sys.stderr)
+            return 2
 
-    result = oca_scan.scan(root)
+        result = oca_scan.scan(root)
 
-    if args.json:
-        out = json.dumps(result, ensure_ascii=False, indent=2, default=str)
-        if args.output:
-            Path(args.output).write_text(out + "\n", encoding="utf-8")
-            print(f"oca: wrote {args.output}")
+        if args.json:
+            out = json.dumps(result, ensure_ascii=False, indent=2, default=str)
+            if args.output:
+                Path(args.output).write_text(out + "\n", encoding="utf-8")
+                print(f"oca: wrote {args.output}")
+            else:
+                print(out)
+        elif args.quiet:
+            s, fs = result["scores"], result["findings_summary"]
+            print(f"overall={s['overall']} axes={s['axes']} "
+                  f"blockers={fs['BLOCKER']} major={fs['MAJOR']} minor={fs['MINOR']}")
         else:
-            print(out)
-    elif args.quiet:
-        s, fs = result["scores"], result["findings_summary"]
-        print(f"overall={s['overall']} axes={s['axes']} "
-              f"blockers={fs['BLOCKER']} major={fs['MAJOR']} minor={fs['MINOR']}")
-    else:
-        text = oca_scan.render_text(result)
-        if args.output:
-            Path(args.output).write_text(text + "\n", encoding="utf-8")
-            print(f"oca: wrote {args.output}")
-        else:
-            print(text)
-    return 0
+            text = oca_scan.render_text(result)
+            if args.output:
+                Path(args.output).write_text(text + "\n", encoding="utf-8")
+                print(f"oca: wrote {args.output}")
+            else:
+                print(text)
+        return 0
+    finally:
+        if cleanup:
+            shutil.rmtree(cleanup, ignore_errors=True)
 
 
 def _cmd_diff(args: argparse.Namespace) -> int:
@@ -178,6 +212,28 @@ def _cmd_report(args: argparse.Namespace) -> int:
     L.append(f"| Syllabus | {st(a['syllabus'])} |")
     L.append(f"| Окружение | {st(a['environment'])} |")
     L.append(f"| Запуск | {st(a['build'])} |")
+    L.append(f"| CI | {st(a['ci'])} |")
+    L.append(f"| Тесты | {st(a.get('tests', []))} |")
+    L.append(f"| Корпус/источники | {st(a['corpus'])} |")
+    L.append(f"| Верификация | {st(a['verification'])} |")
+    L.append(f"| AGENTS.md | {st(a['agent_files'])} |")
+    L.append(f"| syllabus.json | {st(a['syllabus_json'])} |")
+
+    # Evidence from graded scoring
+    ev = r["scores"].get("evidence", {})
+    if ev:
+        L.append("")
+        L.append("### Детали оценки\n")
+        L.append("| Параметр | Значение |")
+        L.append("|---|---|")
+        env_info = ev.get("environment", {})
+        if isinstance(env_info, dict):
+            L.append(f"| Окружение | вид: `{env_info.get('kind', '—')}`, "
+                     f"score: {ev.get('env_score', 0)} |")
+        L.append(f"| Сборка | score: {ev.get('build_score', 0)} |")
+        L.append(f"| Ноутбуки | score: {ev.get('notebook_score', 0)} |")
+        L.append(f"| README | score: {ev.get('readme_score', 0)} |")
+        L.append(f"| Программа | score: {ev.get('syllabus_score', 0)} |")
     L.append(f"| CI | {st(a['ci'])} |")
     L.append(f"| Корпус/источники | {st(a['corpus'])} |")
     L.append(f"| Верификация | {st(a['verification'])} |")
