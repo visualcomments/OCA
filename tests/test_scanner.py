@@ -156,10 +156,16 @@ def main() -> int:
           len(msgs) == len(set(msgs)), f"{msgs}")
 
     # ── 10. scoring is unaffected by presentation ──────────────────────────
-    print("\n[scoring unaffected by grouping]")
+    print("\n[graded scoring]")
     a = scan_fixture("numbered-md")
-    check("overall unchanged by prioritisation",
-          abs(a["scores"]["overall"] - 3.08) < 0.02,
+    # The fixture's requirements.txt holds one bare line ("pytest"), so the
+    # environment is deliberately not reproducible, and a graded score must
+    # sit below the old binary 1.0 rather than pretend otherwise.
+    check("bare requirements.txt is not scored as reproducible",
+          a["scores"]["evidence"]["env_score"] < 0.5,
+          f"env_score={a['scores']['evidence']['env_score']}")
+    check("graded overall is stable",
+          abs(a["scores"]["overall"] - 2.93) < 0.02,
           f"got {a['scores']['overall']}")
 
     # ── 11. licence detection beyond the canonical name ────────────────────
@@ -226,6 +232,46 @@ def main() -> int:
     check("bare placeholder is not mistaken for a granted licence",
           r["scores"]["axes"]["licensing"] < 5.0,
           f"got {r['scores']['axes']['licensing']}")
+
+    # ── 12. the grading ladder itself ──────────────────────────────────────
+    print("\n[grading ladder]")
+
+    def env_case(body: str, filename: str = "requirements.txt") -> dict:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "README.md").write_text("# Курс\n\n" + "описание. " * 40, encoding="utf-8")
+            (root / filename).write_text(body, encoding="utf-8")
+            return oca_scan.scan(root)["scores"]["evidence"]["env_score"]
+
+    bare = env_case("numpy\npandas\nscipy\n")
+    pinned = env_case("numpy==1.26.4\npandas==2.2.0\nscipy==1.12.0\n")
+    soft = env_case("numpy>=1.26\npandas>=2.2\nscipy>=1.12\n")
+    lock = env_case("numpy==1.26.4\n", "poetry.lock")
+
+    check("bare names score low", bare < 0.4, f"got {bare}")
+    check("hard pins score high", pinned > 0.8, f"got {pinned}")
+    check("pinned beats bare", pinned > bare, f"{pinned} vs {bare}")
+    check("range bounds score between bare and pinned",
+          bare < soft < pinned, f"bare={bare} soft={soft} pinned={pinned}")
+    check("lock file scores full", lock == 1.0, f"got {lock}")
+
+    # Notebook grading must not let cosmetic warnings zero the axis.
+    print("\n[notebook grading is severity-weighted]")
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        (root / "README.md").write_text("# Курс\n\n" + "описание. " * 40, encoding="utf-8")
+        messy = {"cells": [{"cell_type": "code", "execution_count": None, "outputs": [],
+                            "metadata": {}, "source": ["x = 1"]} for _ in range(20)],
+                 "metadata": {}, "nbformat": 4, "nbformat_minor": 5}
+        for i in range(4):
+            (root / f"nb{i}.ipynb").write_text(json.dumps(messy), encoding="utf-8")
+        r = oca_scan.scan(root)
+    check("cosmetic notebook warnings do not zero reproducibility",
+          r["scores"]["axes"]["reproducibility"] > 0.0,
+          f"got {r['scores']['axes']['reproducibility']}")
+    check("notebook score stays above the floor",
+          r["scores"]["evidence"]["notebook_score"] >= 0.0,
+          f"got {r['scores']['evidence']['notebook_score']}")
 
     print(f"\n{_passed} passed, {len(_failures)} failed")
     if _failures:

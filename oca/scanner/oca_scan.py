@@ -531,28 +531,53 @@ def scan(root: Path) -> dict:
     n_judged = max(len(judged), 1)
     text_coverage = ratio(len(text_lessons), max(n_lessons, 1))
 
+    # ── graded evidence for the binary-looking checks ───────────────────────
+    env_score, env_info = grade_env(env_files, flat, read_text)
+    build_score = grade_build(build_files)
+    nb_score = grade_notebooks(notebooks)
+
+    # Structure: a README that documents the course beats one that is merely
+    # long enough to pass a threshold; syllabus with a week-by-week plan beats
+    # a title.
+    readme_score = graded_ratio(readme_chars, 3000, floor=0.4) if readme_path else 0.0
+    if readme_path and readme_chars >= 200:
+        readme_score = max(readme_score, 0.5)
+    syl_score = 0.0
+    if syllabus_path:
+        syl_score = 0.6
+        if syllabus_rel:
+            syl_body = read_text(flat[syllabus_rel])
+            weeks = len(re.findall(r"^\s*(?:[-*]|\d+\.|\|)", syl_body, re.MULTILINE))
+            syl_score = 1.0 if weeks >= 6 else (0.8 if weeks >= 3 else 0.6)
+
     structure = 5 * (
-        0.30 * (1 if syllabus_path else 0)
+        0.30 * syl_score
         + 0.30 * ratio(min(n_lessons, LESSON_TARGET), LESSON_TARGET)
-        + 0.20 * (1 if readme_path and readme_chars >= 200 else 0)
+        + 0.20 * readme_score
         + 0.20 * (ratio(sum(1 for d in judged if d["objectives"]), n_judged) if text_lessons else 0.5)
     )
+    # Content: a real corpus with provenance and a verification script is
+    # stronger than a bare bibliography, so both are graded.
     content = 5 * (
         0.35 * (ratio(sum(1 for d in judged if d["sources"]), n_judged) if text_lessons else 0.5)
-        + 0.30 * (1 if corpus_files else 0)
-        + 0.20 * (1 if verify_files else 0)
+        + 0.30 * (1.0 if (corpus_files and verify_files) else (0.6 if corpus_files else 0.0))
+        + 0.20 * (1.0 if verify_files else 0.0)
         + 0.15 * (ratio(sum(1 for d in judged if d["citations"] > 3), n_judged) if text_lessons else 0.5)
     )
+    # Practice: assignments plus a rubric plus self-check questions, each
+    # graded by how many lessons actually carry them (already a ratio).
     practice = 5 * (
         0.35 * (ratio(sum(1 for d in judged if d["assignments"]), n_judged) if text_lessons else 0.5)
         + 0.30 * (ratio(sum(1 for d in judged if d["grading"]), n_judged) if text_lessons else 0.5)
         + 0.35 * (ratio(sum(1 for d in judged if d["self_check"]), n_judged) if text_lessons else 0.5)
     )
+    # Reproducibility: now graded, so a bare requirements.txt (0.25) no
+    # longer scores the same as a fully pinned one (1.0).
     repro = 5 * (
-        0.30 * (1 if env_files else 0)
-        + 0.25 * (1 if build_files else 0)
-        + 0.25 * (1 if ci_files else 0)
-        + 0.20 * (1 - ratio(sum(1 for i in notebooks.values() if i.get("issues")), max(len(notebooks), 0) or 1))
+        0.30 * env_score
+        + 0.25 * build_score
+        + 0.25 * (1.0 if ci_files else 0.0)
+        + 0.20 * nb_score
     )
     # Licensing rewards the substance, not the filename: any recognisable
     # licence artefact earns the base score, the canonical name earns full.
@@ -619,7 +644,17 @@ def scan(root: Path) -> dict:
         "notebooks": notebooks,
         "links": {"relative_links": links["relative_links"], "broken_count": len(links["broken"]),
                   "broken": links["broken"][:50]},
-        "scores": {"axes": axes, "weights": weights, "overall": overall},
+        "scores": {"axes": axes, "weights": weights, "overall": overall,
+                   "evidence": {
+                       "environment": env_info,
+                       "env_score": round(env_score, 3),
+                       "build_score": round(build_score, 3),
+                       "notebook_score": round(nb_score, 3),
+                       "readme_score": round(readme_score, 3),
+                       "syllabus_score": round(syl_score, 3),
+                       "license_score": round(
+                           1.0 if license_files else (0.8 if all_license_artifacts else 0.0), 3),
+                   }},
         "findings": findings,
         "findings_summary": {
             **{lvl: sum(1 for f in findings if f["level"] == lvl)
@@ -627,6 +662,107 @@ def scan(root: Path) -> dict:
             **summarise_findings(findings),
         },
     }
+
+
+# ── graded scoring helpers ──────────────────────────────────────────────────
+# Binary checks ("requirements.txt exists → 1.0") cannot tell a reproducible
+# course from one that merely has the file. Measured across 14 real courses,
+# `requirements.txt` came in two clearly different kinds:
+#
+#   10/10 lines pinned   deep-vision-and-graphics-shad/week04-.../requirements.txt
+#    0/18 lines pinned   ai-studio-course/requirements.txt
+#
+# The first pins every dependency; the second lists bare names, so a student
+# installing it next year gets different library versions than the author
+# used. Both scored identically. These helpers award partial credit so the
+# score reflects the difference.
+
+def graded_ratio(num: float, den: float, floor: float = 0.0) -> float:
+    """Ratio, never below `floor` when the denominator is non-zero."""
+    if not den:
+        return 0.0
+    return max(floor, min(1.0, num / den))
+
+
+def grade_env(env_files: list[str], flat: dict[str, Path], read_text_fn) -> tuple[float, dict]:
+    """Score the environment by how reproducible it actually is (0..1).
+
+    Steps: a lock file is best; a fully pinned requirements file is next;
+    partly pinned is partial; bare names are barely better than nothing.
+    """
+    if not env_files:
+        return 0.0, {"kind": "none"}
+
+    names = {Path(p).name.lower() for p in env_files}
+    # 1.0 — a lock file pins the whole transitive closure
+    if names & {"poetry.lock", "uv.lock", "pipfile.lock", "renv.lock", "conda-lock.yml"}:
+        return 1.0, {"kind": "lock"}
+
+    # environment.yml / pyproject with pinned deps
+    for p in env_files:
+        if Path(p).name in ("environment.yml", "environment.yaml"):
+            body = read_text_fn(flat[p])
+            deps = [l for l in body.splitlines() if l.strip().startswith("-")]
+            pinned = sum(1 for l in deps if re.search(r"[=<>!~]=?", l))
+            return graded_ratio(pinned, len(deps), floor=0.4), {
+                "kind": "environment.yml", "pinned": pinned, "total": len(deps)}
+        if Path(p).name == "pyproject.toml":
+            return 0.85, {"kind": "pyproject"}
+
+    # requirements file: score by the share of pinned dependencies
+    reqs = [p for p in env_files if Path(p).name.lower().startswith("requirements")]
+    if reqs:
+        best, info = 0.0, {"kind": "requirements"}
+        for p in reqs:
+            lines = [l.strip() for l in read_text_fn(flat[p]).splitlines()
+                     if l.strip() and not l.strip().startswith(("#", "-"))]
+            if not lines:
+                continue
+            # `==` is a hard pin; `>=`/`~=` bound the range but drift
+            hard = sum(1 for l in lines if "==" in l)
+            soft = sum(1 for l in lines if re.search(r"[<>!~]=", l))
+            share = (hard + 0.5 * soft) / len(lines)
+            if share > best:
+                best, info = share, {"kind": "requirements", "pinned": hard + soft,
+                                     "hard": hard, "total": len(lines), "file": p}
+        # Bare names still count for something (the file is not worthless),
+        # but must not be confused with a reproducible environment.
+        return max(0.25, best), info
+
+    return 0.4, {"kind": "other"}
+
+
+def grade_build(build_files: list[str]) -> float:
+    """A Makefile with real targets beats a lone run.sh."""
+    if not build_files:
+        return 0.0
+    names = {Path(p).name.lower() for p in build_files}
+    if names & {"justfile", "taskfile.yml"}:
+        return 1.0
+    if "makefile" in names:
+        return 1.0
+    return 0.6
+
+
+def grade_notebooks(notebooks: dict) -> float:
+    """Notebook cleanliness, 0..1.
+
+    Previously this subtracted the raw count of notebooks with any issue,
+    which let a course lose the entire weight for cosmetic cell-ordering
+    warnings. Weighted by severity instead: a notebook that does not parse
+    is a real defect, a stray empty cell is not.
+    """
+    if not notebooks:
+        return 1.0
+    penalty = 0.0
+    for info in notebooks.values():
+        if "parse_error" in info:
+            penalty += 1.0
+            continue
+        issues = info.get("issues", [])
+        # Cap per-notebook penalty so one huge messy notebook cannot zero the axis.
+        penalty += min(0.3, 0.08 * len(issues))
+    return max(0.0, 1.0 - penalty / max(len(notebooks), 1))
 
 
 # ── findings noise control ──────────────────────────────────────────────────
