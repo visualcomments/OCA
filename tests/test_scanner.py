@@ -344,6 +344,52 @@ def main() -> int:
         check("uncached URL is 'unknown' offline, never fetched",
               report2["by_status"].get("unknown") == 1, str(report2["by_status"]))
 
+    # ── 14. the improvement plan ───────────────────────────────────────────
+    print("\n[improvement plan]")
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        (root / "README.md").write_text(
+            "# Курс\n\n" + "описание. " * 40
+            + "\n[битая1](missing/a.md)\n[битая2](missing/b.md)\n[битая3](missing/c.md)\n",
+            encoding="utf-8")
+        (root / "lectures").mkdir()
+        for i in range(1, 4):
+            (root / "lectures" / f"0{i}_t.md").write_text(
+                f"# Тема {i}\n\n## Задания\n\nРешить.\n", encoding="utf-8")
+        r = oca_scan.scan(root)
+
+    plan = r["plan"]
+    check("plan is produced", bool(plan), "empty plan")
+    check("every plan row carries effort and benefit",
+          all(p.get("effort") in ("S", "M", "L") and p["gain"] > 0 for p in plan),
+          str([(p["code"], p.get("effort"), p["gain"]) for p in plan]))
+    check("plan is ordered by benefit per hour, descending",
+          all(plan[i]["priority"] >= plan[i + 1]["priority"] for i in range(len(plan) - 1)),
+          str([p["priority"] for p in plan]))
+
+    # Three broken links are three different messages but ONE action.
+    broken = [p for p in plan if p["code"] == "broken-link"]
+    check("repeated defects merge into a single plan row",
+          len(broken) == 1, f"{len(broken)} broken-link rows")
+    check("merged row reports its true scope",
+          broken and broken[0]["count"] >= 3,
+          f"count={broken[0]['count'] if broken else None}")
+
+    # A BLOCKER must not be buried under a mass of cosmetic repeats.
+    first_blocker = next((i for i, p in enumerate(plan)
+                          if p["impact"] == "blocking"), None)
+    check("a blocker appears near the top of the plan",
+          first_blocker is not None and first_blocker <= 3,
+          f"index={first_blocker}")
+
+    # Effort is a property of the kind of fix, not of the instance count.
+    lic = [p for p in plan if p["code"] == "no-license"]
+    check("adding a LICENSE is a quick win",
+          lic and lic[0]["effort"] == "S", str(lic))
+    gaps = [p for p in plan if p["code"] == "lecture-gaps"]
+    check("writing lesson content is heavy work",
+          not gaps or gaps[0]["effort"] == "L", str(gaps))
+
     print(f"\n{_passed} passed, {len(_failures)} failed")
     if _failures:
         for f in _failures:

@@ -718,6 +718,7 @@ def scan(root: Path) -> dict:
                            1.0 if license_files else (0.8 if all_license_artifacts else 0.0), 3),
                    }},
         "findings": findings,
+        "plan": build_plan(findings),
         "findings_summary": {
             **{lvl: sum(1 for f in findings if f["level"] == lvl)
                for lvl in ("BLOCKER", "MAJOR", "MINOR")},
@@ -874,6 +875,48 @@ IMPACT_LABELS = {
     "low": "КОСМЕТИКА",
 }
 SEVERITY_ORDER = {"BLOCKER": 0, "MAJOR": 1, "MINOR": 2}
+
+# ── effort and axis ─────────────────────────────────────────────────────────
+# Effort belongs to the KIND of fix, not to an individual finding: adding a
+# LICENSE is an S whether it is reported once or 500 times, because the author
+# writes one file. Keeping it a static table makes the improvement plan in the
+# report reproducible, and keeps it out of a model's guesswork.
+#
+#   S — under an hour, mechanical, no course knowledge needed
+#   M — half a day, needs decisions about the course
+#   L — days, needs the author to write teaching material
+EFFORT = {
+    # S: add or rename a file; the content is largely standard
+    "no-license": "S", "nonstandard-license-name": "S", "no-content-license": "S",
+    "no-readme": "S", "thin-readme": "S", "no-ci": "S", "no-build": "S",
+    "no-agents-md": "S", "no-machine-syllabus": "S", "broken-link": "S",
+    # M: requires deciding what the course actually contains
+    "no-syllabus": "M", "syllabus-mismatch": "M", "no-environment": "M",
+    "no-grading": "M", "no-corpus": "M", "no-verification": "M",
+    "bad-notebook": "M", "notebook-hygiene": "M", "pdf-only-materials": "M",
+    # L: must be authored, not generated
+    "no-lectures": "L", "no-assignments": "L", "lecture-gaps": "L",
+    "stub-lecture": "L",
+}
+EFFORT_ORDER = {"S": 0, "M": 1, "L": 2}
+EFFORT_LABELS = {"S": "S — меньше часа", "M": "M — полдня", "L": "L — дни"}
+
+# Which axis each finding code drags down, used to build the plan.
+AXIS_OF = {
+    "no-license": "licensing", "nonstandard-license-name": "licensing",
+    "no-content-license": "licensing",
+    "no-readme": "structure", "thin-readme": "structure",
+    "no-syllabus": "structure", "syllabus-mismatch": "structure",
+    "no-lectures": "structure", "lecture-gaps": "structure",
+    "stub-lecture": "structure", "pdf-only-materials": "structure",
+    "broken-link": "structure",
+    "no-assignments": "practice", "no-grading": "practice",
+    "no-environment": "reproducibility", "no-build": "reproducibility",
+    "no-ci": "reproducibility", "bad-notebook": "reproducibility",
+    "notebook-hygiene": "reproducibility",
+    "no-corpus": "content", "no-verification": "content",
+    "no-agents-md": "agent_readiness", "no-machine-syllabus": "agent_readiness",
+}
 # Codes whose findings are collapsed into a counted group in text output.
 # Only codes that repeat verbatim across files belong here: a group reports
 # one message plus a count, so merging findings that differ in message would
@@ -898,9 +941,11 @@ def finding_weight(f: dict) -> tuple:
 
 
 def annotate_findings(findings: list[dict]) -> list[dict]:
-    """Attach impact and group identical findings."""
+    """Attach impact and effort to every finding, then group and sort."""
     for f in findings:
         f["impact"] = IMPACT.get(f["code"], "medium")
+        f["effort"] = EFFORT.get(f["code"], "M")
+        f["axis"] = AXIS_OF.get(f["code"])
 
     groups: dict[tuple, dict] = {}
     out: list[dict] = []
@@ -913,8 +958,12 @@ def annotate_findings(findings: list[dict]) -> list[dict]:
             key = (f["code"], f["level"], f["impact"], f["message"])
             g = groups.get(key)
             if g is None:
+                # Copy every annotation, not just impact: a group built here
+                # bypasses the loop above, so omitting effort/axis made
+                # grouped findings render as "Труд: None" in the plan.
                 g = {
                     "level": f["level"], "code": f["code"], "impact": f["impact"],
+                    "effort": f["effort"], "axis": f["axis"],
                     "message": f["message"], "path": f["path"],
                     "paths": [f["path"]] if f["path"] else [],
                     "count": 1,
@@ -929,6 +978,108 @@ def annotate_findings(findings: list[dict]) -> list[dict]:
             out.append(f)
 
     out.sort(key=finding_weight)
+    return out
+
+
+def build_plan(findings: list[dict], scores: dict | None = None) -> list[dict]:
+    """Order findings into an improvement plan by benefit per unit of effort.
+
+    Sorting by severity alone gives a bad plan: it puts "write the missing
+    lectures" (days of authoring) above "add a LICENSE" (one file), so an
+    author with an afternoon to spare finishes nothing. The plan ranks by how
+    much score a fix can plausibly recover per unit of effort, so quick wins
+    come first and the heavy authoring work is last but still visible.
+
+    `gain` is an estimate, not a promise: it is the axis weight times a fixed
+    per-impact factor. Real gains depend on how much of the axis the finding
+    actually blocks, which is why the report says "потенциал", not "даст".
+    """
+    weights = {"structure": 0.25, "content": 0.20, "practice": 0.20,
+               "reproducibility": 0.15, "licensing": 0.10, "agent_readiness": 0.10}
+    # How much of an axis's weight a fix of this impact can plausibly recover.
+    impact_factor = {"blocking": 1.0, "high": 0.6, "medium": 0.3, "low": 0.1}
+    # Rough cost in hours, used only to compare fixes against each other.
+    effort_hours = {"S": 1.0, "M": 4.0, "L": 16.0}
+
+    plans: list[dict] = []
+    for f in findings:
+        axis = f.get("axis")
+        weight = weights.get(axis or "", 0.0)
+        factor = impact_factor.get(f.get("impact", "medium"), 0.3)
+        # A group of N instances is not N times the work — the author writes
+        # one file or one script — but it is worth more, because it lifts the
+        # axis across the whole course. `count` is 1 for ungrouped findings.
+        count = f.get("count", 1)
+        reach = 1.0 + min(1.0, (count - 1) / 20.0) * 0.5
+        # Findings with no axis still deserve a place in the plan: a broken
+        # link is a real defect even though it maps to no single axis here.
+        # Without this they sorted last with a gain of zero and looked
+        # unimportant, which is the opposite of the truth.
+        if weight == 0.0:
+            gain = 0.02 * factor * reach
+        else:
+            gain = weight * factor * reach
+        hours = effort_hours.get(f.get("effort", "M"), 4.0)
+        plans.append({
+            "code": f["code"],
+            "message": f["message"],
+            "axis": axis,
+            "impact": f.get("impact"),
+            "effort": f.get("effort"),
+            "count": count,
+            "path": f.get("path"),
+            "gain": round(gain, 3),
+            "hours": hours,
+            # Benefit per hour. Grouped findings rank higher because one
+            # action clears every instance, which is exactly the intent.
+            "priority": round(gain / hours, 4),
+        })
+
+    plans = _merge_plan_entries(plans)
+    plans.sort(key=lambda p: (-p["priority"], EFFORT_ORDER.get(p["effort"], 1),
+                              IMPACT_ORDER.get(p["impact"], 2), p["code"]))
+    return plans
+
+
+def _merge_plan_entries(plans: list[dict]) -> list[dict]:
+    """Merge plan rows that share a code, effort and impact into one action.
+
+    Grouping by exact message is not enough here: six broken links have six
+    different targets, so they stayed separate rows and pushed a real BLOCKER
+    (the missing LICENSE) down to seventh place in the plan. A reader with an
+    afternoon sees six variants of "a link is broken" and not the one thing
+    that actually blocks the course.
+
+    Fixing one broken link means fixing the links, so they are one action
+    with a count. The gain is not summed — the axis weight is already counted
+    once per action — but `count` is carried so the row shows its true scope.
+    """
+    merged: dict[tuple, dict] = {}
+    order: list[tuple] = []
+    for p in plans:
+        # Axis is part of the key: the same code could in principle be
+        # reported against different axes, and those are different fixes.
+        key = (p["code"], p.get("effort"), p.get("impact"), p.get("axis"))
+        if key not in merged:
+            merged[key] = dict(p, paths=[p["path"]] if p.get("path") else [])
+            order.append(key)
+        else:
+            m = merged[key]
+            m["count"] += p.get("count", 1)
+            if p.get("path"):
+                m["paths"].append(p["path"])
+            # Keep the widest-reaching instance as the headline message.
+            if p.get("count", 1) > 1:
+                m["message"] = p["message"]
+
+    out = []
+    for key in order:
+        m = merged[key]
+        # Recompute reach now that the count is final, so a merged row is
+        # ranked by the work it really clears.
+        m["reach_count"] = m["count"]
+        m["paths"] = m["paths"][:5]
+        out.append(m)
     return out
 
 

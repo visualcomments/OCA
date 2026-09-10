@@ -18,6 +18,7 @@ from pathlib import Path
 
 from oca import __version__
 from oca.scanner import oca_diff, oca_scan
+from oca.scanner.oca_scan import IMPACT_LABELS, EFFORT_LABELS
 
 TEMPLATE_DIR = Path(__file__).resolve().parent / "templates"
 
@@ -137,11 +138,32 @@ def _cmd_report(args: argparse.Namespace) -> int:
             L.append(f"- …и ещё {len(minor) - 40}")
         L.append("")
 
-    L.append("---\n\n## 4. Улучшения (по приоритету)\n")
-    L.append("<!-- TODO: отсортировать по отношению польза/трудозатраты -->\n")
-    L.append("| # | Улучшение | Ось | Польза | Труд | Файлы |")
-    L.append("|---|---|---|---|---|---|")
-    L.append("| 1 | | | | | |\n")
+    L.append("---\n\n## 4. План улучшений\n")
+    plan = r.get("plan") or []
+    if plan:
+        L.append("Отсортировано по отношению пользы к трудозатратам: сначала то, "
+                 "что даёт наибольший прирост за меньшее время. «Потенциал» — "
+                 "оценка вклада в итоговый балл, а не обещание.\n")
+        L.append("| # | Улучшение | Ось | Важность | Труд | Потенциал | Файлы |")
+        L.append("|---|---|---|---|---|---|---|")
+        for i, p in enumerate(plan[:15], 1):
+            loc = f"`{p['path']}`" if p.get("path") else "—"
+            cnt = f" (×{p['count']})" if p.get("count", 1) > 1 else ""
+            msg = p["message"][:60] + ("…" if len(p["message"]) > 60 else "")
+            L.append(f"| {i} | **{p['code']}** — {msg}{cnt} | {p.get('axis') or '—'} "
+                     f"| {IMPACT_LABELS.get(p['impact'], p['impact'])} "
+                     f"| {p['effort']} | +{p['gain']:.2f} | {loc} |")
+        if len(plan) > 15:
+            L.append(f"| … | ещё {len(plan) - 15} пунктов — см. `oca scan --json` "
+                     f"→ `plan` | | | | | |")
+        # Summarise the whole plan, not just the shown slice.
+        quick = [p for p in plan if p["effort"] == "S"]
+        L.append("")
+        L.append(f"**Быстрые победы (S):** {len(quick)} "
+                 f"из {len(plan)} пунктов — можно закрыть за один вечер.")
+    else:
+        L.append("Находок нет — улучшать нечего.")
+    L.append("")
 
     L.append("---\n\n## 5. Артефакты\n")
     L.append("| Артефакт | Состояние |")
