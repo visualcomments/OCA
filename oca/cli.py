@@ -182,6 +182,49 @@ def _cmd_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_linkcheck(args: argparse.Namespace) -> int:
+    """Network pass over external links, kept out of the deterministic scan."""
+    from oca import linkcheck
+
+    root = Path(args.path).expanduser().resolve()
+    if not root.is_dir():
+        print(f"oca: {root} is not a directory", file=sys.stderr)
+        return 2
+
+    result = oca_scan.scan(root)
+    external = result["links"].get("external", [])
+    if not external:
+        print("oca: внешних ссылок не найдено")
+        return 0
+
+    cache_dir = Path(args.cache).expanduser() if args.cache else (root / ".oca-cache")
+    print(f"oca: проверяю {len(external)} внешних ссылок "
+          f"(таймаут {args.timeout}с, потоков {args.workers})…", file=sys.stderr)
+
+    report = linkcheck.check_links(
+        external, cache_dir,
+        timeout=args.timeout, workers=args.workers, offline=args.offline,
+    )
+    text = linkcheck.render(report)
+    if args.json:
+        out = json.dumps(report, ensure_ascii=False, indent=2, default=str)
+        if args.output:
+            Path(args.output).write_text(out + "\n", encoding="utf-8")
+            print(f"oca: wrote {args.output}")
+        else:
+            print(out)
+    else:
+        if args.output:
+            Path(args.output).write_text(text + "\n", encoding="utf-8")
+            print(f"oca: wrote {args.output}")
+        else:
+            print(text)
+
+    # Broken links are worth a non-zero exit so CI can gate on them;
+    # `blocked` is deliberately excluded from that decision.
+    return 1 if report["by_status"].get("broken") else 0
+
+
 def _cmd_templates(args: argparse.Namespace) -> int:
     if not TEMPLATE_DIR.is_dir():
         print("oca: no templates found", file=sys.stderr)
@@ -228,6 +271,19 @@ def build_parser() -> argparse.ArgumentParser:
     t = sub.add_parser("templates", help="list or copy artefact templates")
     t.add_argument("dest", nargs="?", help="copy templates into this directory")
     t.set_defaults(func=_cmd_templates)
+
+    lc = sub.add_parser(
+        "linkcheck",
+        help="check external links over the network (not part of scan)")
+    lc.add_argument("path")
+    lc.add_argument("--timeout", type=int, default=10, help="per-URL timeout, seconds")
+    lc.add_argument("--workers", type=int, default=8, help="parallel requests")
+    lc.add_argument("--cache", help="cache directory (default: <repo>/.oca-cache)")
+    lc.add_argument("--offline", action="store_true",
+                    help="answer from cache only, never touch the network")
+    lc.add_argument("--json", action="store_true", help="machine-readable output")
+    lc.add_argument("-o", "--output", help="write output to a file")
+    lc.set_defaults(func=_cmd_linkcheck)
 
     return p
 

@@ -273,6 +273,77 @@ def main() -> int:
           r["scores"]["evidence"]["notebook_score"] >= 0.0,
           f"got {r['scores']['evidence']['notebook_score']}")
 
+    # ── 13. external links: collected offline, classified without network ──
+    print("\n[external links]")
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        (root / "README.md").write_text(
+            "# Курс\n\n" + "описание. " * 40
+            + "\n[ссылка](https://example.com/a) и голая https://example.com/b\n"
+            + "[битая локальная](missing/file.md)\n",
+            encoding="utf-8")
+        nb = {"cells": [{"cell_type": "markdown", "metadata": {},
+                         "source": ["См. https://arxiv.org/abs/1706.03762\\n"]}],
+              "metadata": {}, "nbformat": 4, "nbformat_minor": 5}
+        (root / "nb.ipynb").write_text(json.dumps(nb), encoding="utf-8")
+        r = oca_scan.scan(root)
+
+    urls = {e["url"] for e in r["links"]["external"]}
+    check("markdown links are collected",
+          "https://example.com/a" in urls, str(urls))
+    check("bare markdown URLs are collected",
+          "https://example.com/b" in urls, str(urls))
+    check("notebook URLs are collected",
+          any("arxiv.org" in u for u in urls), str(urls))
+    check("trailing escape is stripped from notebook URLs",
+          all("\\n" not in u for u in urls), str(urls))
+    check("relative broken link still reported",
+          r["links"]["broken_count"] == 1, str(r["links"]["broken"]))
+    # The scan result holds Path objects, so it cannot be dumped directly.
+    # What matters is that no status/verdict field exists at all: scan()
+    # collects links but never judges them, which is what keeps it offline.
+    check("scan records link counts but no verdicts",
+          "external_count" in r["links"] and "by_status" not in r["links"],
+          str(sorted(r["links"].keys())))
+    check("scan output carries no cache or fetch metadata",
+          not any(k in r["links"] for k in ("checked_at", "cache", "results")),
+          str(sorted(r["links"].keys())))
+
+    # Classification logic, exercised without any real request.
+    print("\n[link classification without network]")
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from oca import linkcheck as lc
+
+    check("DOI and publisher redirects count as ok",
+          302 in lc.OK_STATUSES and 200 in lc.OK_STATUSES)
+    check("403 is blocked, not broken",
+          403 in lc.BLOCKED_STATUSES and 403 not in lc.OK_STATUSES)
+    check("429 is blocked, not broken", 429 in lc.BLOCKED_STATUSES)
+    check("404 is not treated as blocked", 404 not in lc.BLOCKED_STATUSES)
+    check("messenger hosts are recognised as sandbox-limited",
+          lc._is_sandbox_limited("https://t.me/someone", "Network is unreachable"))
+    check("unreachable network error is sandbox-limited",
+          lc._is_sandbox_limited("https://ordinary.edu/x", "Network is unreachable"))
+    check("a plain 404 is NOT sandbox-limited",
+          not lc._is_sandbox_limited("https://ordinary.edu/x", "HTTP 404"))
+    check("host extraction handles subdomains",
+          lc._host_of("https://a.b.example.com/x") == "a.b.example.com")
+
+    # Cache round-trip: offline mode must serve without network.
+    print("\n[link cache]")
+    with tempfile.TemporaryDirectory() as td:
+        cache = Path(td)
+        lc.LinkCache(cache).put("https://example.com/a",
+                                {"status": "ok", "code": 200, "reason": ""})
+        report = lc.check_links([{"file": "README.md", "url": "https://example.com/a"}],
+                                cache, offline=True)
+        check("cached URL is served in offline mode",
+              report["by_status"].get("ok") == 1, str(report["by_status"]))
+        report2 = lc.check_links([{"file": "README.md", "url": "https://example.com/uncached"}],
+                                 cache, offline=True)
+        check("uncached URL is 'unknown' offline, never fetched",
+              report2["by_status"].get("unknown") == 1, str(report2["by_status"]))
+
     print(f"\n{_passed} passed, {len(_failures)} failed")
     if _failures:
         for f in _failures:

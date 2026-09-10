@@ -42,6 +42,34 @@ jobs:
             echo "bad path rejected: OK"
           fi
 
+      - name: scan() never touches the network
+        run: |
+          # scan() must be offline by construction. If a future change makes
+          # it fetch URLs, this proxy-less environment will hang or fail.
+          python - <<'PYEOF'
+          import json, subprocess, sys
+          r = subprocess.run([sys.executable, "-m", "oca.cli", "scan",
+                              "tests/fixtures/numbered-md", "--json"],
+                             capture_output=True, text=True, timeout=120)
+          assert r.returncode == 0, r.stderr
+          links = json.loads(r.stdout)["links"]
+          assert "by_status" not in links, "scan() judged links: it must not"
+          assert "external_count" in links, "external links not collected"
+          print("scan is offline and collects links: OK")
+          PYEOF
+
+      - name: linkcheck runs fully offline from cache
+        run: |
+          mkdir -p /tmp/lc-cache
+          python -m oca.cli linkcheck tests/fixtures/numbered-md \
+            --cache /tmp/lc-cache --offline --json -o /tmp/lc.json
+          python - <<'PYEOF'
+          import json
+          rep = json.load(open("/tmp/lc.json"))
+          assert rep["cache"]["offline"] is True
+          print("offline linkcheck: OK", rep["by_status"])
+          PYEOF
+
       - name: CLI smoke test
         run: |
           python -m oca.cli --version

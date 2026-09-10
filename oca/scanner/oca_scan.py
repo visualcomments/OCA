@@ -163,14 +163,62 @@ MD_LINK_RE = re.compile(r"\[[^\]]*\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
 
 
 def check_links(files: list[Path], root: Path) -> dict:
+    """Collect relative links (checked locally) and external links (not checked).
+
+    External links are gathered but never fetched here: `scan()` must stay
+    deterministic and offline. Across the surveyed courses, markdown holds
+    3082 external links — but notebooks hold 8858, three times as many.
+    A course's links live in its teaching material, not only in its README,
+    so notebooks are scanned too (as JSON source text, which is what a
+    notebook is).
+    """
     broken: list[dict] = []
     total = 0
+    external: list[dict] = []
+    seen_ext: set[tuple[str, str]] = set()
+    RAW_URL_RE = re.compile(r"https?://[^\s\)\]\"'<>,;]+")
+
+    def clean_url(u: str) -> str:
+        """Strip trailing punctuation that belongs to the prose, not the URL.
+
+        Notebook cells are JSON strings, so a URL frequently ends with a
+        literal escape (`.../optimize.html\\n`) or a closing bracket that the
+        regex cannot see inside an escaped context. Leaving those in produces
+        a 404 against a URL that is actually fine.
+        """
+        u = u.replace("\\n", "").replace("\\r", "").replace("\\t", "")
+        u = u.rstrip(".,;:!?")
+        while u.endswith(")") and u.count("(") < u.count(")"):
+            u = u[:-1]
+        return u.strip()
+
     for f in files:
-        if f.suffix.lower() not in (".md", ".markdown", ".rst"):
+        suffix = f.suffix.lower()
+        if suffix not in (".md", ".markdown", ".rst", ".ipynb"):
             continue
         text = read_text(f)
+        relpath = rel(f, root)
+
+        if suffix == ".ipynb":
+            # Notebooks carry links in markdown cells and in outputs; take
+            # every absolute URL rather than trying to parse the JSON here.
+            for raw in RAW_URL_RE.findall(text):
+                url = clean_url(raw)
+                key = (relpath, url)
+                if key not in seen_ext and url:
+                    seen_ext.add(key)
+                    external.append({"file": relpath, "url": url})
+            continue
+
         for raw in MD_LINK_RE.findall(text):
-            if raw.startswith(("http://", "https://", "mailto:", "#", "tel:")):
+            if raw.startswith(("http://", "https://")):
+                url = clean_url(raw)
+                key = (relpath, url)
+                if key not in seen_ext and url:
+                    seen_ext.add(key)
+                    external.append({"file": relpath, "url": url})
+                continue
+            if raw.startswith(("mailto:", "#", "tel:")):
                 continue
             target = raw.split("#", 1)[0]
             if not target:
@@ -178,8 +226,18 @@ def check_links(files: list[Path], root: Path) -> dict:
             total += 1
             resolved = (f.parent / target).resolve()
             if not resolved.exists():
-                broken.append({"file": rel(f, root), "target": raw})
-    return {"relative_links": total, "broken": broken}
+                broken.append({"file": relpath, "target": raw})
+
+        # Bare URLs in markdown text are common too and were previously
+        # invisible: `[x](y)` misses "see https://example.com/paper".
+        for raw in RAW_URL_RE.findall(text):
+            url = clean_url(raw)
+            key = (relpath, url)
+            if key not in seen_ext and url:
+                seen_ext.add(key)
+                external.append({"file": relpath, "url": url})
+
+    return {"relative_links": total, "broken": broken, "external": external}
 
 
 # ── main scan ───────────────────────────────────────────────────────────────
@@ -643,7 +701,11 @@ def scan(root: Path) -> dict:
         "lectures": lecture_detail,
         "notebooks": notebooks,
         "links": {"relative_links": links["relative_links"], "broken_count": len(links["broken"]),
-                  "broken": links["broken"][:50]},
+                  "broken": links["broken"][:50],
+                  # Collected, never fetched — see oca.linkcheck for the
+                  # opt-in network pass and why it lives outside scan().
+                  "external_count": len(links["external"]),
+                  "external": links["external"][:200]},
         "scores": {"axes": axes, "weights": weights, "overall": overall,
                    "evidence": {
                        "environment": env_info,
