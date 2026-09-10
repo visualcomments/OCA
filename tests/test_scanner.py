@@ -11,6 +11,7 @@ corresponds to a defect that actually shipped once — that is the point.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import sys
 import tempfile
@@ -389,6 +390,107 @@ def main() -> int:
     gaps = [p for p in plan if p["code"] == "lecture-gaps"]
     check("writing lesson content is heavy work",
           not gaps or gaps[0]["effort"] == "L", str(gaps))
+
+    # ── 15. lesson layouts that broke the scanner on real repositories ─────
+    # Every case below was found by scanning 16 real courses; the previous
+    # behaviour is named in each check so a regression is recognisable.
+    print("\n[lesson layout regressions]")
+
+    def layout(files: dict[str, str], dirs: list[str] | None = None) -> dict:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "README.md").write_text("# Курс\n\n" + "описание. " * 40, encoding="utf-8")
+            for d in (dirs or []):
+                (root / d).mkdir(parents=True, exist_ok=True)
+            for rel, body in files.items():
+                p = root / rel
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text(body, encoding="utf-8")
+            return oca_scan.scan(root)
+
+    body = "# Занятие\n\n## Проверьте себя\n\nВопросы.\n"
+
+    # week_01_DSP: underscore separator. Previously the module was swallowed
+    # by de-duplication and a 12-week course scored as ONE lesson.
+    r = layout({f"week_{i:02d}_topic/README.md": body for i in range(1, 13)})
+    check("week_NN_name modules are counted separately",
+          r["counts"]["lectures"] >= 10,
+          f"got {r['counts']['lectures']}, expected 12")
+
+    # homework01: no separator between word and number.
+    r = layout({f"homework{i:02d}/task.md": body for i in range(1, 6)})
+    check("homeworkNN modules are counted separately",
+          r["counts"]["lectures"] >= 4,
+          f"got {r['counts']['lectures']}, expected 5")
+
+    # Textbook layout: one chapter per directory, each with README.md.
+    r = layout({f"book/part-1/{i:02d}-topic/README.md": body for i in range(1, 7)})
+    check("textbook chapters (folder/README.md) are lessons",
+          r["counts"]["lectures"] >= 5,
+          f"got {r['counts']['lectures']}, expected 6")
+
+    # One lesson must not be counted three times (dir + notes.pdf + lecture.pdf).
+    r = layout({
+        "Лекции/Лекция 1/Лекция 1.pdf": "",
+        "Лекции/Лекция 1/Заметки Лекция 1.pdf": "",
+        "Лекции/Лекция 2/Лекция 2.pdf": "",
+        "Лекции/Лекция 2/Заметки Лекция 2.pdf": "",
+    })
+    check("a lecture folder with PDFs counts once, not three times",
+          r["counts"]["lectures"] == 2,
+          f"got {r['counts']['lectures']}, expected 2")
+
+    # …but a SECTION holding many lessons must not collapse.
+    r = layout({f"Семинары/Семинар {i}/notes.md": body for i in range(1, 9)})
+    check("a section of many lessons does not collapse into one",
+          r["counts"]["lectures"] >= 7,
+          f"got {r['counts']['lectures']}, expected 8")
+
+    # PDF-only lessons must still be reported even when wrapped in a folder.
+    r = layout({"Лекции/Лекция 1/Лекция 1.pdf": ""})
+    check("PDF-only lessons are still reported from inside a folder",
+          any(f["code"] == "pdf-only-materials" for f in r["findings"]),
+          str([f["code"] for f in r["findings"]]))
+
+    # ── 16. determinism across processes ──────────────────────────────────
+    # The suite's other determinism checks run in ONE process, where set
+    # iteration order is stable. The scanner is invoked as a separate
+    # process in real use, where Python randomises string hashing — and a
+    # bare `set` of top-level files made the licence list come out in a
+    # different order each run, changing the findings text. Only a subprocess
+    # with a forced hash seed catches that.
+    print("\n[determinism across processes]")
+    import subprocess
+
+    fixture = Path(__file__).resolve().parent / "fixtures" / "numbered-md"
+    pkg_root = Path(__file__).resolve().parent.parent
+    outputs = []
+    for seed in ("0", "1", "2"):
+        env = dict(os.environ, PYTHONHASHSEED=seed, PYTHONPATH=str(pkg_root))
+        proc = subprocess.run(
+            [sys.executable, "-m", "oca.cli", "scan", str(fixture), "--json"],
+            capture_output=True, text=True, env=env, timeout=120)
+        if proc.returncode != 0:
+            check(f"scan runs with PYTHONHASHSEED={seed}", False, proc.stderr[:200])
+            continue
+        outputs.append(proc.stdout)
+    check("scan output is identical across hash seeds",
+          len(outputs) == 3 and len(set(outputs)) == 1,
+          f"{len(set(outputs))} distinct outputs from {len(outputs)} runs")
+
+    # A directory whose contents differ only by name order must scan the same.
+    print("\n[file order does not affect the result]")
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        (root / "README.md").write_text("# Курс\n\n" + "описание. " * 40, encoding="utf-8")
+        for name in ("LICENSE-code.md", "LICENSE-text.md", "NOTICE.md", "COPYING.md"):
+            (root / name).write_text("MIT\n", encoding="utf-8")
+        first = oca_scan.scan(root)["findings"]
+        second = oca_scan.scan(root)["findings"]
+        check("repeated scans of the same directory agree",
+              json.dumps(first, sort_keys=True, default=str)
+              == json.dumps(second, sort_keys=True, default=str),
+              "findings differ between two scans")
 
     print(f"\n{_passed} passed, {len(_failures)} failed")
     if _failures:

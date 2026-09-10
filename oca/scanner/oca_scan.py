@@ -31,8 +31,18 @@ CONTENT_LICENSE_RE = re.compile(r"(CONTENT[-_]?LICENSE|LICENSE[-_]?(CONTENT|CC|T
 SYLLABUS_RE = re.compile(r"^(syllabus|программа|program|course[-_]?info)\.(md|json|ya?ml|toml|pdf)$", re.IGNORECASE)
 # Lesson files may be .md, .ipynb, .pdf or .tex, numbered or Cyrillic-named.
 # Two shapes are common: "01_topic.md" (bare number) and "lecture01.md".
-LECTURE_RE = re.compile(r"^(?:\d{1,2}[\s\-_.]|(?:lecture|lesson|week|занятие|лекция|topic|seminar|"
-                        r"семинар|homework|hw|домашн)[\s\-_]?\d+)", re.IGNORECASE)
+# A lesson FILE name: "01_topic.md" (matched on the stem "01_topic"),
+# "lecture01", "week_09". Must NOT match a module DIRECTORY like
+# "week_09_codecs": the old pattern stopped after the digits, so it matched
+# "week_09" inside that name and strategy (a) then registered the whole
+# module as a plain lesson dir, which de-duplication used to swallow its
+# siblings — collapsing a 12-week course to one lesson. Requiring the name
+# to end (or continue with a word separator) keeps files and modules apart.
+LECTURE_RE = re.compile(
+    r"^(?:\d{1,2}(?:[\s\-_.]|$)|"
+    r"(?:lecture|lesson|week|занятие|лекция|topic|seminar|семинар|homework|hw|домашн)"
+    r"[\s\-_]?\d+(?:[\s\-_.]|$))",
+    re.IGNORECASE)
 LECTURE_DIR_RE = re.compile(r"^(lectures?|lessons?|seminars?|занятия|лекции|семинары|"
                             r"домашние задания|homeworks?|tasks?|задания|labs?|"
                             r"лабораторные|workshops?|practice)$", re.IGNORECASE)
@@ -45,10 +55,37 @@ ENV_FILES = ("requirements.txt", "environment.yml", "environment.yaml", "pyproje
 BUILD_FILES = ("Makefile", "makefile", "justfile", "Justfile", "Taskfile.yml", "build.sh", "run.sh")
 AGENT_FILES = ("AGENTS.md", "CLAUDE.md", ".cursorrules")
 CI_DIRS = (".github/workflows", ".gitlab-ci.yml", ".circleci")
-ASSIGNMENT_RE = re.compile(r"(задани|assignment|exercise|упражнени|практик|homework|домашн)", re.IGNORECASE)
-GRADING_RE = re.compile(r"(критери|оцениван|rubric|grading|балл|score|assessment)", re.IGNORECASE)
-SELFCHECK_RE = re.compile(r"(самопроверк|вопросы для|self[- ]?check|quiz|контрольные вопросы)", re.IGNORECASE)
-OBJECTIVES_RE = re.compile(r"(цел[иь]|задачи занятия|learning outcomes?|результаты обучения|you will learn)", re.IGNORECASE)
+ASSIGNMENT_RE = re.compile(
+    # Match the STEM of the word, not one inflected form. "задани" misses
+    # "заданий" (a different vowel in the ending), and that single gap made a
+    # capstone file full of staged exercises ("Сформируйте команду",
+    # "Заполните чек-лист") report as having no assignments at all.
+    # "задач-" is deliberately NOT included: that is задача (a problem to
+    # solve), not задание (an assignment to hand in).
+    r"(задани|задний|assignment|exercise|упражнени|практик|homework|домашн)",
+    re.IGNORECASE)
+GRADING_RE = re.compile(
+    r"(критери|оцениван|rubric|grading|балл|score|assessment)", re.IGNORECASE)
+SELFCHECK_RE = re.compile(
+    # "Проверьте себя" appeared 19 times in one course and was not matched,
+    # so the course was told it had no self-check at all. Surveying real
+    # headings across 16 courses gives these forms, in order of frequency:
+    # "Вопросы для самопроверки" (67), "Проверьте себя" (19).
+    r"(самопроверк|вопросы для|self[- ]?check|quiz|контрольные вопросы|"
+    r"проверьте себя|проверь себя|контрольн(ый|ые) вопрос|закреплени|"
+    r"частые вопросы|вопросы и ответы|faq)",
+    re.IGNORECASE)
+OBJECTIVES_RE = re.compile(
+    # Tuned against real headings across 16 courses, which include
+    # "Цели встречи", "Результат недели", "Ожидаемый результат" and plain
+    # "Цель". A bare "цел" was too loose — it matched "целый" and "в целом" —
+    # but requiring exactly "цель" was too tight and lost "цели"/"целей".
+    # This matches the learning-goal senses while excluding "целый".
+    r"(цел(ь|и|ей|ям|ями)\b|цель заняти|задачи заняти|"
+    r"результат(ы)?\s+(недели|обучения|занятия|освоения)|"
+    r"ожидаемый результат|по итогам|чему вы научитесь|"
+    r"learning outcomes?|you will learn)",
+    re.IGNORECASE)
 CORPUS_RE = re.compile(r"(CORPUS|PROVENANCE|BIBLIOGRAPHY|REFERENCES|ИСТОЧНИКИ)", re.IGNORECASE)
 VERIFY_RE = re.compile(r"(verif|проверк|validate)", re.IGNORECASE)
 SOURCES_RE = re.compile(r"(источник|литератур|references?|bibliograph|список литератур)", re.IGNORECASE)
@@ -60,10 +97,18 @@ SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", ".mypy_cach
 # ── helpers ─────────────────────────────────────────────────────────────────
 
 def walk_files(root: Path) -> list[Path]:
+    """Every file under `root`, in a stable order.
+
+    Sort both the directory list and the file names: os.walk order follows the
+    filesystem, which differs between machines and filesystems. The scanner
+    promises the same input yields the same output, and that promise covers
+    file order, not just the final score.
+    """
     out: list[Path] = []
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS and not d.startswith(".git")]
-        for name in filenames:
+        dirnames[:] = sorted(d for d in dirnames
+                             if d not in SKIP_DIRS and not d.startswith(".git"))
+        for name in sorted(filenames):
             out.append(Path(dirpath) / name)
     return out
 
@@ -255,7 +300,12 @@ def scan(root: Path) -> dict:
     files = walk_files(root)
     flat = {rel(f, root): f for f in files}
     names_lower = {p.lower(): p for p in flat}
-    top = {p for p in flat if "/" not in p}
+    # Sorted, not a bare set: set iteration order varies between processes
+    # (string hashing is randomised), which made the licence list — and every
+    # message built from it — differ between two runs on the same input.
+    # Determinism is the scanner's core promise, so order must not depend on
+    # the interpreter's hash seed.
+    top = sorted(p for p in flat if "/" not in p)
 
     # README
     readme_path = next((flat[p] for p in top if README_RE.match(p)), None)
@@ -351,6 +401,16 @@ def scan(root: Path) -> dict:
         parts = p.split("/")
         for seg in parts[:-1]:
             if LECTURE_RE.match(seg) or LECTURE_DIR_RE.match(seg) or NESTED_RE.match(seg):
+                # Skip segments that are really one of the numbered module
+                # directories handled by strategy (b): "week_09_codecs" is a
+                # module, not a lesson file. Registering it here as a plain
+                # lesson dir let de-duplication swallow its siblings and
+                # collapsed a 12-week course to a single lesson.
+                full_seg = "/".join(parts[:parts.index(seg) + 1])
+                if re.match(r"^(?:\d+[\s\-_.]|(?:week|module|тема|unit|chapter|глава|"
+                            r"homeworks?|hw|labs?|tasks?|assignments?)[\s\-_.]?\d)",
+                            seg, re.IGNORECASE):
+                    break
                 idx = parts.index(seg)
                 container = "/".join(parts[:idx + 1])
                 # Walk down while children are still lesson containers.
@@ -375,12 +435,22 @@ def scan(root: Path) -> dict:
             _add_lesson(p, "file")
 
     # (b) numbered top-level module dirs (1-intro-ai-studio, 2016-fall, ...)
-    top_dirs = {p.split("/")[0] for p in flat if "/" in p}
+    top_dirs = sorted({p.split("/")[0] for p in flat if "/" in p})
     for d in top_dirs:
-        if re.match(r"^\d+[-_]", d) or re.match(r"^(week|module|тема)[\s\-_]?\d", d, re.IGNORECASE):
+        # Any separator counts: measured across 16 courses the layout appears
+        # as week_01_DSP, week-03-x, week04, week 5 and homework01. Requiring
+        # a hyphen or space missed week_01_* and homework01 entirely, which
+        # collapsed speech-processing-shad (12 weeks) to a single lesson and
+        # deep-vision (5 homeworks) to two.
+        if re.match(r"^\d+[\s\-_.]", d) or re.match(
+                r"^(week|module|тема|unit|chapter|глава)[\s\-_.]?\d", d, re.IGNORECASE):
+            _add_lesson(d, "module")
+        # homework01 / hw2 / lab3 as top-level containers
+        elif re.match(r"^(homeworks?|hw|labs?|tasks?|assignments?|задани[еяй])[\s\-_.]?\d",
+                      d, re.IGNORECASE):
             _add_lesson(d, "module")
         # year-term layout (ml-course-hse: 2016-fall, 2017-spring)
-        if re.match(r"^\d{4}[-_](fall|spring|summer|winter|осень|весна)", d, re.IGNORECASE):
+        if re.match(r"^\d{4}[\s\-_](fall|spring|summer|winter|осень|весна)", d, re.IGNORECASE):
             _add_lesson(d, "module")
 
     # (b2) lab*/homework*/task* dirs even without a digit (unn-itmm-ycloud/lab1)
@@ -400,6 +470,28 @@ def scan(root: Path) -> dict:
     for p in slide_files:
         _add_lesson(p, "slide")
 
+    # (c2) textbook layout: one chapter per directory, each holding README.md.
+    # This is how a course is written as a BOOK rather than as a lecture list
+    # (flutter-mipt: book/part-2-ui/09-gestures/README.md, 23 chapters).
+    # Those chapters carry the goals, the exercises and "Проверьте себя", so
+    # without this strategy the scanner judged all of it invisible and told
+    # the course it had no objectives and no self-check — while the text did
+    # both 19 times. 8 of 16 surveyed courses use this layout.
+    chapter_dirs = [p[: -len("/README.md")] for p in flat
+                    if p.endswith("/README.md") and p.count("/") >= 1]
+    # Drop chapters that are already a numbered module (week_09_codecs has a
+    # README too). Without this, 4 such folders became "chapters" while the
+    # other 7 weeks became "modules", and the de-duplication step below then
+    # treated the modules as nested inside the chapters — collapsing a
+    # 12-week course to a single lesson.
+    chapter_dirs = [d for d in chapter_dirs if d not in lessons]
+    # Guard against a repository with a couple of stray sub-READMEs (a tool
+    # folder, a vendored dependency): only treat them as chapters when the
+    # layout is systematic, i.e. several of them and few loose lessons.
+    if len(chapter_dirs) >= 3 and len(chapter_dirs) >= len(lessons):
+        for d in chapter_dirs:
+            _add_lesson(d, "chapter")
+
     # (d) de-duplicate: when a module container is already counted, drop the
     # lessons nested inside it (ml-course-hse counts 2016-fall once, not its
     # 30 lecture notes plus 20 seminar dirs as separate lessons).
@@ -414,6 +506,52 @@ def scan(root: Path) -> dict:
             for p in [q for q in lessons if lesson_kind.get(q) == "dir"]:
                 lessons.discard(p)
                 lesson_kind.pop(p, None)
+
+    # (d2) drop lessons nested inside another lesson.
+    # "Лекции/Лекция 1" is a lesson dir, and it also holds "Лекция 1.pdf"
+    # (matched by strategy (a)) and "Заметки Лекция 1.pdf" (matched by the
+    # slide rule) — three records for ONE lesson, which inflated
+    # optimization-methods to 71 lessons for 15 lectures plus 21 assignments.
+    #
+    # Only apply this to a container that is NOT a broad section. Collapsing
+    # "Семинары/" would hide its 20 seminars behind one record, which is how
+    # an early version of this rule reduced a course of 17 lessons to 3.
+    # A section is a plain container holding several lesson children; a lesson
+    # container holds files, or at most one nested lesson.
+    def _nested_lesson_children(p: str) -> list[str]:
+        prefix = p + "/"
+        kids = set()
+        for q in lessons:
+            if q == p or not q.startswith(prefix):
+                continue
+            rest = q[len(prefix):]
+            kids.add(rest.split("/")[0])
+        return sorted(kids)
+
+    def _is_lesson_container(p: str) -> bool:
+        if not (root / p).is_dir() or lesson_kind.get(p) not in ("dir", "chapter", "module"):
+            return False
+        # A readable document directly inside makes it a concrete lesson.
+        direct_files = [q for q in flat
+                        if q.startswith(p + "/") and "/" not in q[len(p) + 1:]]
+        if any(Path(q).suffix.lower() in (".md", ".ipynb", ".tex", ".html") for q in direct_files):
+            return True
+        # A folder holding its own material (PDF slides/notes) is one lesson
+        # too: "Лекции/Лекция 1" holds "Лекция 1.pdf" and "Заметки ….pdf".
+        # Counting those separately gave three records for one lecture.
+        if direct_files and all(Path(q).suffix.lower() in
+                                (".pdf", ".pptx", ".docx", ".zip", ".csv", ".txt")
+                                for q in direct_files):
+            return True
+        # Otherwise treat it as a lesson only when it has a single nested child.
+        return len(_nested_lesson_children(p)) <= 1
+
+    containers = sorted((p for p in lessons if _is_lesson_container(p)),
+                        key=len)  # shortest first, so parents claim children
+    for c in containers:
+        for p in [q for q in lessons if q != c and q.startswith(c + "/")]:
+            lessons.discard(p)
+            lesson_kind.pop(p, None)
 
     lesson_paths = sorted(lessons)
     lecture_files = lesson_paths  # kept for backward-compatible naming
@@ -526,7 +664,23 @@ def scan(root: Path) -> dict:
     # PDF-only lectures carry binary content; flagging them for "no objectives"
     # would be a false positive, so they are reported separately.
     text_lessons = [d for d in lecture_detail if d["chars"] > 0]
-    pdf_only = [d for d in lecture_detail if d["chars"] == 0 and d["path"].endswith(".pdf")]
+    # A lesson whose readable text is empty and whose material is all PDF/PPTX.
+    # The old test required the lesson path to end in ".pdf", which broke once
+    # a lesson became a container ("Лекции/Лекция 1/Лекция 1.pdf" is now
+    # reported as the lesson "Лекции/Лекция 1"): the container has no text
+    # either, so it belongs in this list just the same.
+    def _is_binary_only(d: dict) -> bool:
+        if d["chars"] > 0:
+            return False
+        if d["path"].endswith((".pdf", ".pptx", ".docx")):
+            return True
+        prefix = d["path"] + "/"
+        inner = [q for q in flat if q.startswith(prefix)]
+        return bool(inner) and all(
+            q.endswith((".pdf", ".pptx", ".docx")) or Path(q).name.startswith(".")
+            for q in inner)
+
+    pdf_only = [d for d in lecture_detail if _is_binary_only(d)]
 
     for d in text_lessons:
         missing = [k for k in ("objectives", "assignments", "self_check", "sources") if not d[k]]
