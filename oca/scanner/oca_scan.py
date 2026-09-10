@@ -522,6 +522,11 @@ def scan(root: Path) -> dict:
         + 0.10 * (1 if verify_files else 0)
     )
 
+    # Attach impact + collapse duplicates BEFORE storing, so the JSON
+    # consumers (oca diff, report generator) see the same prioritised view
+    # as the text renderer.
+    findings = annotate_findings(findings)
+
     axes = {
         "structure": round(structure, 2),
         "content": round(content, 2),
@@ -568,10 +573,144 @@ def scan(root: Path) -> dict:
         "scores": {"axes": axes, "weights": weights, "overall": overall},
         "findings": findings,
         "findings_summary": {
-            lvl: sum(1 for f in findings if f["level"] == lvl)
-            for lvl in ("BLOCKER", "MAJOR", "MINOR")
+            **{lvl: sum(1 for f in findings if f["level"] == lvl)
+               for lvl in ("BLOCKER", "MAJOR", "MINOR")},
+            **summarise_findings(findings),
         },
     }
+
+
+# ── findings noise control ──────────────────────────────────────────────────
+# Not every finding deserves equal room in a report. Measured on 14 real
+# courses, `notebook-hygiene` alone produced 835 findings — 69% of all
+# output — while 8 genuine BLOCKERs drowned in it. So each finding code
+# carries two extra attributes:
+#
+#   impact   — does this change whether the course is usable, or is it polish?
+#   weight   — sort key, severity x impact. Higher = more urgent.
+#
+# `group` findings are collapsed into one line with a count instead of one
+# line each: 431 cosmetic notes about execution_count is not 431 problems.
+IMPACT = {
+    # structural / legal — a reader cannot use or reuse the course
+    "no-readme": "blocking",
+    "no-license": "blocking",
+    "no-lectures": "blocking",
+    # materially reduce value
+    "no-syllabus": "high",
+    "no-assignments": "high",
+    "no-grading": "high",
+    "no-environment": "high",
+    "broken-link": "high",
+    "bad-notebook": "high",
+    "stub-lecture": "high",
+    "syllabus-mismatch": "high",
+    "thin-readme": "high",
+    "pdf-only-materials": "high",
+    # worth fixing, not urgent
+    "no-content-license": "medium",
+    "no-corpus": "medium",
+    "no-verification": "medium",
+    "lecture-gaps": "medium",
+    "no-ci": "medium",
+    "no-build": "medium",
+    # cosmetic / informational
+    "notebook-hygiene": "low",
+    "no-agents-md": "low",
+    "no-machine-syllabus": "low",
+}
+IMPACT_ORDER = {"blocking": 0, "high": 1, "medium": 2, "low": 3}
+IMPACT_LABELS = {
+    "blocking": "БЛОКИРУЕТ",
+    "high": "ВАЖНО",
+    "medium": "СТОИТ ПОЧИНИТЬ",
+    "low": "КОСМЕТИКА",
+}
+SEVERITY_ORDER = {"BLOCKER": 0, "MAJOR": 1, "MINOR": 2}
+# Codes whose findings are collapsed into a counted group in text output.
+# Only codes that repeat verbatim across files belong here: a group reports
+# one message plus a count, so merging findings that differ in message would
+# lose information.
+GROUP_CODES = {"notebook-hygiene", "lecture-gaps", "broken-link", "bad-notebook"}
+
+
+def finding_weight(f: dict) -> tuple:
+    """Sort key: most urgent first.
+
+    Ordered by impact, then severity, then number of affected files. Impact
+    leads because severity alone is too coarse: `no-agents-md` and
+    `no-content-license` are both MINOR, but one is polish and the other is
+    a legal question.
+    """
+    return (
+        IMPACT_ORDER.get(f.get("impact", "medium"), 2),
+        SEVERITY_ORDER.get(f["level"], 2),
+        -len(f.get("paths") or ([f["path"]] if f.get("path") else [])),
+        f["code"],
+    )
+
+
+def annotate_findings(findings: list[dict]) -> list[dict]:
+    """Attach impact and group identical findings."""
+    for f in findings:
+        f["impact"] = IMPACT.get(f["code"], "medium")
+
+    groups: dict[tuple, dict] = {}
+    out: list[dict] = []
+    for f in findings:
+        if f["code"] in GROUP_CODES:
+            # Group on the message too. Two findings of the same code can say
+            # different things ("no self_check" vs "no objectives, self_check");
+            # merging them would silently drop the distinction and make the
+            # group's message describe only its first member.
+            key = (f["code"], f["level"], f["impact"], f["message"])
+            g = groups.get(key)
+            if g is None:
+                g = {
+                    "level": f["level"], "code": f["code"], "impact": f["impact"],
+                    "message": f["message"], "path": f["path"],
+                    "paths": [f["path"]] if f["path"] else [],
+                    "count": 1,
+                }
+                groups[key] = g
+                out.append(g)
+            else:
+                g["count"] += 1
+                if f["path"]:
+                    g["paths"].append(f["path"])
+        else:
+            out.append(f)
+
+    out.sort(key=finding_weight)
+    return out
+
+
+def summarise_findings(findings: list[dict]) -> dict:
+    """Counts per level plus per impact band, for the report header."""
+    by_impact: dict[str, int] = {}
+    for f in findings:
+        by_impact[f.get("impact", "medium")] = by_impact.get(f.get("impact", "medium"), 0) + 1
+    return {
+        "total": len(findings),
+        "by_impact": by_impact,
+        "blocking": by_impact.get("blocking", 0),
+    }
+
+
+def _render_finding(f: dict) -> str:
+    """One finding as a single readable line.
+
+    A grouped finding reports its count instead of repeating itself 431
+    times; a single finding shows its file path.
+    """
+    n = f.get("count", 1)
+    head = f"[{f['level']}] {f['message']}"
+    if n > 1:
+        head += f"   ×{n}"
+    paths = f.get("paths") or ([f["path"]] if f.get("path") else [])
+    if paths:
+        head += f"   ({paths[0]}" + (f" +{len(paths) - 1}" if len(paths) > 1 else "") + ")"
+    return head
 
 
 # ── rendering ───────────────────────────────────────────────────────────────
@@ -618,15 +757,29 @@ def render_text(r: dict) -> str:
     L.append(f"  {'ИТОГО':<24} {'':<5} {s['overall']:.2f} / 5")
     L.append("")
     fs = r["findings_summary"]
-    L.append(f"Находки: BLOCKER={fs['BLOCKER']} MAJOR={fs['MAJOR']} MINOR={fs['MINOR']}")
-    for lvl in ("BLOCKER", "MAJOR", "MINOR"):
-        items = [f for f in r["findings"] if f["level"] == lvl]
+    tot = fs.get("total", len(r["findings"]))
+    bands = fs.get("by_impact", {})
+    L.append(f"Находки: BLOCKER={fs['BLOCKER']} MAJOR={fs['MAJOR']} MINOR={fs['MINOR']}"
+             f"  (всего {tot})")
+    if bands:
+        L.append("  по важности: "
+                 + " · ".join(f"{IMPACT_LABELS[k]}={bands[k]}"
+                              for k in ("blocking", "high", "medium", "low") if k in bands))
+
+    # Three blocks by impact, most urgent first. Within a block the sorted
+    # order from annotate_findings is preserved.
+    for band in ("blocking", "high", "medium", "low"):
+        items = [f for f in r["findings"] if f.get("impact") == band]
         if not items:
             continue
-        L.append(f"\n[{lvl}]")
+        L.append(f"\n[{IMPACT_LABELS[band]}]  {len(items)}")
         for f in items:
-            loc = f"  ({f['path']})" if f["path"] else ""
-            L.append(f"  • {f['message']}{loc}")
+            L.append("  • " + _render_finding(f))
+            for extra in (f.get("paths") or [])[3:6]:
+                L.append(f"      … {extra}")
+            if len(f.get("paths") or []) > 6:
+                L.append(f"      … и ещё {len(f['paths']) - 6}")
+
     if r["lectures"]:
         L.append("\nЗанятия:")
         for d in r["lectures"][:40]:

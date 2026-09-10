@@ -111,6 +111,57 @@ def main() -> int:
     except (FileNotFoundError, NotADirectoryError, SystemExit):
         check("missing path raises", True)
 
+    # ── 9. finding prioritisation and grouping ─────────────────────────────
+    print("\n[prioritisation and grouping]")
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        (root / "README.md").write_text("# Курс\n\n" + "описание. " * 40, encoding="utf-8")
+        # no LICENSE -> BLOCKER; no syllabus -> MAJOR; several noisy notebooks
+        (root / "lectures").mkdir()
+        for i in range(1, 4):
+            (root / "lectures" / f"0{i}_t.md").write_text(
+                f"# Тема {i}\n\n## Задания\n\nРешить.\n", encoding="utf-8")
+        nb = {"cells": [{"cell_type": "code", "execution_count": None, "outputs": [],
+                         "metadata": {}, "source": ["x = 1"]}],
+              "metadata": {}, "nbformat": 4, "nbformat_minor": 5}
+        for i in range(5):
+            (root / f"nb{i}.ipynb").write_text(json.dumps(nb), encoding="utf-8")
+        r = oca_scan.scan(root)
+
+    by_code = {f["code"]: f for f in r["findings"]}
+    check("every finding carries an impact",
+          all("impact" in f for f in r["findings"]), "some finding lacks impact")
+    check("BLOCKER sorts before cosmetic findings",
+          r["findings"][0].get("impact") == "blocking",
+          f"first impact={r['findings'][0].get('impact')}")
+    check("no-license is blocking",
+          by_code.get("no-license", {}).get("impact") == "blocking")
+    check("notebook-hygiene is low impact",
+          by_code.get("notebook-hygiene", {}).get("impact") == "low")
+    hygiene = by_code.get("notebook-hygiene")
+    check("repeated notebook findings collapse into one group",
+          hygiene is not None and hygiene.get("count", 0) >= 5,
+          f"count={hygiene.get('count') if hygiene else None}")
+    check("grouped finding keeps every affected path",
+          hygiene is not None and len(hygiene.get("paths") or []) >= 5,
+          f"paths={len(hygiene.get('paths') or []) if hygiene else 0}")
+    check("summary reports impact bands",
+          r["findings_summary"].get("blocking", 0) >= 1,
+          str(r["findings_summary"]))
+
+    # Grouping must not merge findings that say different things.
+    print("\n[grouping preserves distinct messages]")
+    msgs = [f["message"] for f in r["findings"] if f["code"] == "lecture-gaps"]
+    check("distinct lecture-gaps messages stay separate",
+          len(msgs) == len(set(msgs)), f"{msgs}")
+
+    # ── 10. scoring is unaffected by presentation ──────────────────────────
+    print("\n[scoring unaffected by grouping]")
+    a = scan_fixture("numbered-md")
+    check("overall unchanged by prioritisation",
+          abs(a["scores"]["overall"] - 3.08) < 0.02,
+          f"got {a['scores']['overall']}")
+
     print(f"\n{_passed} passed, {len(_failures)} failed")
     if _failures:
         for f in _failures:

@@ -104,23 +104,38 @@ def _cmd_report(args: argparse.Namespace) -> int:
     blockers = [f for f in r["findings"] if f["level"] == "BLOCKER"]
     if blockers:
         for f in blockers:
-            L.append(f"- **{f['code']}** — {f['message']}"
-                     + (f"  \n  `{f['path']}`" if f["path"] else ""))
+            loc = f"  \n  `{f['path']}`" if f["path"] else ""
+            cnt = f" (×{f['count']})" if f.get("count", 1) > 1 else ""
+            L.append(f"- **{f['code']}** — {f['message']}{cnt}{loc}")
     else:
         L.append("Блокеров не найдено.")
     L.append("")
 
     L.append("---\n\n## 3. Существенные находки (MAJOR)\n")
+    # Sorted by impact, so the reader meets legal and structural problems
+    # before cosmetic ones. Grouped findings state their count instead of
+    # repeating a line per file.
     majors = [f for f in r["findings"] if f["level"] == "MAJOR"]
     if majors:
         for f in majors[:40]:
-            L.append(f"- **{f['code']}** — {f['message']}"
-                     + (f"  \n  `{f['path']}`" if f["path"] else ""))
+            loc = f"  \n  `{f['path']}`" if f["path"] else ""
+            cnt = f" (×{f['count']})" if f.get("count", 1) > 1 else ""
+            L.append(f"- **{f['code']}** — {f['message']}{cnt}{loc}")
         if len(majors) > 40:
             L.append(f"- …и ещё {len(majors) - 40}")
     else:
         L.append("Существенных находок нет.")
     L.append("")
+
+    minor = [f for f in r["findings"] if f["level"] == "MINOR"]
+    if minor:
+        L.append("### Прочие находки (MINOR)\n")
+        for f in minor[:40]:
+            cnt = f" (×{f['count']})" if f.get("count", 1) > 1 else ""
+            L.append(f"- **{f['code']}** — {f['message']}{cnt}")
+        if len(minor) > 40:
+            L.append(f"- …и ещё {len(minor) - 40}")
+        L.append("")
 
     L.append("---\n\n## 4. Улучшения (по приоритету)\n")
     L.append("<!-- TODO: отсортировать по отношению польза/трудозатраты -->\n")

@@ -52,25 +52,54 @@ def main() -> int:
     for lvl in ("BLOCKER", "MAJOR", "MINOR"):
         print(f"  {lvl:<8} {bf.get(lvl, 0):3d} → {af.get(lvl, 0):3d}")
 
-    def key(f: dict) -> tuple:
-        return (f["code"], f.get("path") or "", f["message"])
+    # A grouped finding holds many file paths in `paths` while a single one
+    # holds just `path`. To compare two scans honestly we expand BOTH sides
+    # into one record per affected file: otherwise collapsing 431 notes into
+    # a single group reads as "431 findings closed", which is false.
+    def instances(findings: list[dict]) -> dict:
+        out: dict[tuple, int] = {}
+        for f in findings:
+            paths = f.get("paths") or ([f["path"]] if f.get("path") else [""])
+            n = f.get("count", 1)
+            # A group's count may exceed its stored paths (paths are capped);
+            # keep the undistributed remainder under an empty-path key so the
+            # totals still match.
+            for p in paths:
+                key = (f["code"], p, f["message"])
+                out[key] = out.get(key, 0) + 1
+            if n > len(paths):
+                key = (f["code"], "", f["message"])
+                out[key] = out.get(key, 0) + (n - len(paths))
+        return out
 
-    bset = {key(f) for f in before["findings"]}
-    aset = {key(f) for f in after["findings"]}
+    bc_all, ac_all = instances(before["findings"]), instances(after["findings"])
 
-    closed = bset - aset
-    opened = aset - bset
+    closed = bc_all.keys() - ac_all.keys()
+    opened = ac_all.keys() - bc_all.keys()
+    resized = [(k, bc_all[k], ac_all[k]) for k in bc_all.keys() & ac_all.keys()
+               if bc_all[k] != ac_all[k]]
 
     print()
+    if resized:
+        print(f"Изменилось количество экземпляров: {len(resized)}")
+        for (code, path, msg), b_n, a_n in sorted(resized)[:12]:
+            print(f"  ± [{code}] {msg[:60]}  {b_n}→{a_n}" + (f"  ({path})" if path else ""))
+        if len(resized) > 12:
+            print(f"  …и ещё {len(resized) - 12}")
+
     if closed:
-        print(f"Закрыто находок: {len(closed)}")
-        for code, path, msg in sorted(closed):
+        print(f"\nЗакрыто находок: {len(closed)}")
+        for code, path, msg in sorted(closed)[:24]:
             print(f"  ✓ [{code}] {msg}" + (f"  ({path})" if path else ""))
+        if len(closed) > 24:
+            print(f"  …и ещё {len(closed) - 24}")
     if opened:
         print(f"\nНовых находок: {len(opened)}")
-        for code, path, msg in sorted(opened):
+        for code, path, msg in sorted(opened)[:24]:
             print(f"  ✗ [{code}] {msg}" + (f"  ({path})" if path else ""))
-    if not closed and not opened:
+        if len(opened) > 24:
+            print(f"  …и ещё {len(opened) - 24}")
+    if not closed and not opened and not resized:
         print("Состав находок не изменился.")
 
     print()
