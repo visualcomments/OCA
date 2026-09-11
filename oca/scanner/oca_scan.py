@@ -43,6 +43,20 @@ LECTURE_RE = re.compile(
     r"(?:lecture|lesson|week|занятие|лекция|topic|seminar|семинар|homework|hw|домашн)"
     r"[\s\-_]?\d+(?:[\s\-_.]|$))",
     re.IGNORECASE)
+# Numbered process documents that are NOT lessons: "10-legal-public-domain.md",
+# "20-assignments.md", "45-community-competition.md". Guide-style repositories
+# number their documents in steps (10, 20, 30, 40, 45) to fix an order; those
+# numbers are step indices, not lesson numbers. Treating them as lessons
+# produced four phantom "lecture-gaps" findings on a course whose 30 real
+# lessons were complete -- the scanner measured guide steps against a lesson
+# checklist and reported the course as deficient.
+#
+# The reliable signal is the directory, not the number: real lessons live in
+# a lecture-like container (lectures/, weeks/, занятия/) or at the top level,
+# while guide steps live in a topic-named directory such as
+# "capstone-aviation-radar/". A directory holding several round-numbered
+# documents and no unnumbered lesson file is a guide.
+PROCESS_DOC_RE = re.compile(r"^\d{2}(?:[\s\-_.])", re.IGNORECASE)
 LECTURE_DIR_RE = re.compile(r"^(lectures?|lessons?|seminars?|занятия|лекции|семинары|"
                             r"домашние задания|homeworks?|tasks?|задания|labs?|"
                             r"лабораторные|workshops?|practice)$", re.IGNORECASE)
@@ -368,6 +382,26 @@ def scan(root: Path) -> dict:
         lessons.add(p)
         lesson_kind.setdefault(p, kind)
 
+    def _in_lecture_container(p: str, flat: list[str]) -> bool:
+        """True when `p` sits in a directory that really holds lessons.
+
+        A round-numbered file is a lesson when its directory is a lesson
+        container ("lectures/", "weeks/", "занятия/"), the repository root,
+        or a directory whose other files are unnumbered lesson material. It
+        is a guide step when the directory is a topic-named guide such as
+        "capstone-aviation-radar/", whose files are numbered 10, 20, 30, 40,
+        45 and none of which is a lesson.
+
+        Distinguishing by directory rather than by number matters because
+        guide numbering is not restricted to tens: the same capstone uses
+        "45-community-competition.md" for a sub-step, and a tens-only rule
+        left it counted as a lesson.
+        """
+        if "/" not in p:
+            return True
+        parent = p.rsplit("/", 1)[0]
+        return bool(LECTURE_DIR_RE.match(parent.rsplit("/", 1)[-1]))
+
     # (a) numbered / Cyrillic-named lesson containers anywhere in the tree.
     # A directory only collapses into ONE lesson when its children are not
     # themselves lessons; `lectures/01_x.md ... lectures/16_z.md` must yield
@@ -431,7 +465,11 @@ def scan(root: Path) -> dict:
                     _add_lesson(container, "dir")
                 break
         stem = Path(p).stem
-        if p.endswith(MATERIAL_SUFFIXES) and LECTURE_RE.match(stem):
+        # Decade-numbered process docs are guides, not lessons; see
+        # PROCESS_DOC_RE. Skip them before the general lesson match.
+        if (p.endswith(MATERIAL_SUFFIXES) and LECTURE_RE.match(stem)
+                and not (PROCESS_DOC_RE.match(stem)
+                         and not _in_lecture_container(p, flat))):
             _add_lesson(p, "file")
 
     # (b) numbered top-level module dirs (1-intro-ai-studio, 2016-fall, ...)

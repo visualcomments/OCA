@@ -554,6 +554,47 @@ def main() -> int:
         check("disabled_checkers is loaded",
               "testing" in cfg["disabled_checkers"], str(cfg["disabled_checkers"]))
 
+
+    # ── 19. руководства шагов не считаются занятиями ─────────────────────
+    print("\n[guide steps are not lessons]")
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        # A course with 3 real lessons plus a guide directory whose files are
+        # numbered as process steps. An earlier version counted the guide
+        # steps as lessons and reported phantom "lecture-gaps" findings --
+        # measuring guide documents against a lesson checklist.
+        (root / "lectures").mkdir()
+        for i in range(1, 4):
+            (root / "lectures" / f"{i:02d}_tema.md").write_text(
+                f"# Занятие {i:02d}\n\n## Цели занятия\n\n- цель\n\n"
+                "## Вопросы для самопроверки\n\n1. вопрос?\n\n"
+                "## Задания\n\n- задание\n", encoding="utf-8")
+        guide = root / "capstone-aviation-radar"
+        guide.mkdir()
+        for name in ("10-legal-public-domain.md", "20-assignments.md",
+                     "30-dataset-spec-template.md", "45-community-competition.md"):
+            (guide / name).write_text(f"# {name}\n\nтекст\n", encoding="utf-8")
+
+        res = oca_scan.scan(str(root))
+        check("guide steps are not counted as lessons",
+              len(res["lectures"]) == 3, str(len(res["lectures"])))
+        gaps = [f.get("path", "") for f in res["findings"]
+                if f["code"] == "lecture-gaps"]
+        phantom = [g for g in gaps if "capstone" in g]
+        check("no phantom lecture-gaps from guide steps",
+              not phantom, str(phantom))
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        # A round-numbered file in a real lecture directory IS a lesson.
+        (root / "lectures").mkdir()
+        for name in ("01_vvedenie.md", "10_arhitektura.md", "20_itog.md"):
+            (root / "lectures" / name).write_text(
+                "# Занятие\n\n## Цели занятия\n\n- цель\n", encoding="utf-8")
+        res = oca_scan.scan(str(root))
+        check("round numbers in a lecture dir stay lessons",
+              len(res["lectures"]) == 3, str(len(res["lectures"])))
+
     print(f"\n{_passed} passed, {len(_failures)} failed")
     if _failures:
         for f in _failures:
