@@ -595,6 +595,193 @@ def main() -> int:
         check("round numbers in a lecture dir stay lessons",
               len(res["lectures"]) == 3, str(len(res["lectures"])))
 
+    # ── 20. content integrity: duplicate sections ────────────────────────
+    print("\n[content integrity: duplicate sections]")
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        (root / "lectures").mkdir()
+        (root / "lectures" / "10_kant.md").write_text(
+            "# Занятие 10\n\n## Тезис\n\nТекст.\n\n"
+            "## Авторский синтез\n\nСинтез.\n\n"
+            "## Вопросы для самопроверки\n\n1. Вопрос?\n\n"
+            "## Задания\n\n- Задание.\n\n"
+            "## Авторский синтез\n\nСинтез.\n\n"
+            "## Вопросы для самопроверки\n\n1. Вопрос?\n\n"
+            "## Задания\n\n- Задание.\n",
+            encoding="utf-8")
+        (root / "syllabus.md").write_text("# Программа\n", encoding="utf-8")
+        res = oca_scan.scan(str(root))
+        codes = [f["code"] for f in res["findings"]]
+        check("duplicate-sections detected",
+              "duplicate-sections" in codes, str(codes))
+
+    # ── 21. content integrity: orphaned report line ──────────────────────
+    print("\n[content integrity: orphaned report line]")
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        (root / "lectures").mkdir()
+        (root / "lectures" / "16_popper.md").write_text(
+            "# Занятие 16\n\n## Тезис\n\nТекст.\n\n"
+            "> `verification/REPORT.md`)\n\n"
+            "## Вопросы для самопроверки\n\n1. Вопрос?\n",
+            encoding="utf-8")
+        (root / "syllabus.md").write_text("# Программа\n", encoding="utf-8")
+        res = oca_scan.scan(str(root))
+        codes = [f["code"] for f in res["findings"]]
+        check("orphaned-report-line detected",
+              "orphaned-report-line" in codes, str(codes))
+
+    # ── 22. content integrity: OCR in questions ──────────────────────────
+    print("\n[content integrity: OCR in questions]")
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        (root / "lectures").mkdir()
+        (root / "lectures" / "09_berkli.md").write_text(
+            "# Занятие 9\n\n## Тезис\n\nТекст.\n\n"
+            "## Вопросы для самопроверки\n\n"
+            "1. Что утверждает имматuOME People are fubject to a certain "
+            "delicacy of paffion and adverfity\n\n"
+            "## Задания\n\n- Задание.\n",
+            encoding="utf-8")
+        (root / "syllabus.md").write_text("# Программа\n", encoding="utf-8")
+        res = oca_scan.scan(str(root))
+        codes = [f["code"] for f in res["findings"]]
+        check("ocr-in-questions detected",
+              "ocr-in-questions" in codes, str(codes))
+
+    # Clean lecture does NOT trigger content integrity findings
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        (root / "lectures").mkdir()
+        (root / "lectures" / "01_intro.md").write_text(
+            "# Занятие 1\n\n## Тезис\n\nТекст.\n\n"
+            "## Цели занятия\n\n- Цель.\n\n"
+            "## Вопросы для самопроверки\n\n1. Вопрос?\n2. Ещё?\n\n"
+            "## Задания\n\n- Задание.\n\n"
+            "**Навигация:** [← 00](00.md) · [Программа](../syllabus.md)\n",
+            encoding="utf-8")
+        (root / "syllabus.md").write_text(
+            "# Программа\n\n| 01 | [Введение](lectures/01_intro.md) |\n",
+            encoding="utf-8")
+        res = oca_scan.scan(str(root))
+        ci_codes = [f["code"] for f in res["findings"]
+                    if f["code"] in ("duplicate-sections",
+                                     "orphaned-report-line",
+                                     "ocr-in-questions")]
+        check("clean lecture has no content-integrity findings",
+              not ci_codes, str(ci_codes))
+
+    # ── 23. syllabus-lecture links ───────────────────────────────────────
+    print("\n[syllabus-lecture links]")
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        (root / "lectures").mkdir()
+        (root / "lectures" / "01_intro.md").write_text(
+            "# Занятие\n", encoding="utf-8")
+        (root / "lectures" / "02_topic.md").write_text(
+            "# Занятие\n", encoding="utf-8")
+        (root / "syllabus.md").write_text(
+            "# Программа\n\n| № | Тема |\n|---|---|\n| 01 | Введение |\n",
+            encoding="utf-8")
+        res = oca_scan.scan(str(root))
+        codes = [f["code"] for f in res["findings"]]
+        check("syllabus-no-lecture-links detected",
+              "syllabus-no-lecture-links" in codes, str(codes))
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        (root / "lectures").mkdir()
+        (root / "lectures" / "01_intro.md").write_text(
+            "# Занятие\n", encoding="utf-8")
+        (root / "syllabus.md").write_text(
+            "# Программа\n\n| 01 | [Введение](lectures/01_intro.md) |\n",
+            encoding="utf-8")
+        res = oca_scan.scan(str(root))
+        codes = [f["code"] for f in res["findings"]]
+        check("no false positive when syllabus links lectures",
+              "syllabus-no-lecture-links" not in codes, str(codes))
+
+    # ── 24. lesson structure: goals and navigation ───────────────────────
+    print("\n[lesson structure: goals and navigation]")
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        (root / "lectures").mkdir()
+        (root / "lectures" / "01_bare.md").write_text(
+            "# Занятие 1\n\n## Тезис\n\nТекст.\n\n"
+            "## Вопросы для самопроверки\n\n1. Вопрос?\n",
+            encoding="utf-8")
+        (root / "syllabus.md").write_text("# Программа\n", encoding="utf-8")
+        res = oca_scan.scan(str(root))
+        codes = [f["code"] for f in res["findings"]]
+        check("no-learning-goals detected",
+              "no-learning-goals" in codes, str(codes))
+        check("no-navigation detected",
+              "no-navigation" in codes, str(codes))
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        (root / "lectures").mkdir()
+        (root / "lectures" / "01_full.md").write_text(
+            "# Занятие 1\n\n## Тезис\n\nТекст.\n\n"
+            "## Цели занятия\n\n- Цель.\n\n"
+            "## Вопросы для самопроверки\n\n1. Вопрос?\n\n"
+            "**Навигация:** [← 00](00.md) · [Программа](../syllabus.md)\n",
+            encoding="utf-8")
+        (root / "syllabus.md").write_text("# Программа\n", encoding="utf-8")
+        res = oca_scan.scan(str(root))
+        struct_codes = [f["code"] for f in res["findings"]
+                        if f["code"] in ("no-learning-goals", "no-navigation")]
+        check("full lecture has no structure findings",
+              not struct_codes, str(struct_codes))
+
+    # ── 25. coordinate debt ──────────────────────────────────────────────
+    print("\n[coordinate debt]")
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        (root / "lectures").mkdir()
+        (root / "verification").mkdir()
+        (root / "verification" / "REPORT.md").write_text(
+            "# Отчёт\n", encoding="utf-8")
+        (root / "lectures" / "01_intro.md").write_text(
+            "# Занятие\n\n> **Цитата:** «текст»\n"
+            "**Источник:** `file.txt` · фрагмент —\n",
+            encoding="utf-8")
+        (root / "syllabus.md").write_text("# Программа\n", encoding="utf-8")
+        res = oca_scan.scan(str(root))
+        codes = [f["code"] for f in res["findings"]]
+        check("coordinates-missing-number detected",
+              "coordinates-missing-number" in codes, str(codes))
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        (root / "lectures").mkdir()
+        (root / "lectures" / "01_intro.md").write_text(
+            "# Занятие\n\n**Источник:** `file.txt` · фрагмент —\n",
+            encoding="utf-8")
+        (root / "syllabus.md").write_text("# Программа\n", encoding="utf-8")
+        res = oca_scan.scan(str(root))
+        codes = [f["code"] for f in res["findings"]]
+        check("no coordinate-debt finding without verification report",
+              "coordinates-missing-number" not in codes, str(codes))
+
+    # ── 26. CI: python3 and bash selftest recognised ─────────────────────
+    print("\n[CI: python3 and bash selftest]")
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        (root / ".github" / "workflows").mkdir(parents=True)
+        (root / ".github" / "workflows" / "ci.yml").write_text(
+            "name: CI\non: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n"
+            "    steps:\n      - run: python3 tests/test_tools.py\n"
+            "      - run: bash .github/scripts/selftest.sh\n",
+            encoding="utf-8")
+        (root / "tests").mkdir()
+        (root / "tests" / "test_tools.py").write_text(
+            "def test_x(): pass\n", encoding="utf-8")
+        res = oca_scan.scan(str(root))
+        codes = [f["code"] for f in res["findings"]]
+        check("python3 + bash selftest counts as tests",
+              "ci-no-tests" not in codes, str(codes))
+
     print(f"\n{_passed} passed, {len(_failures)} failed")
     if _failures:
         for f in _failures:

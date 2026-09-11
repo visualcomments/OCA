@@ -37,8 +37,9 @@ _SCRIPT_INJECTION_RE = re.compile(
     r"\$\{\{\s*(github\.event\.(issue|pull_request|comment|review)\."
     r"(title|body|head\.ref)|steps\.\w+\.outputs?\.\w+)", re.IGNORECASE)
 _TEST_COMMAND_RE = re.compile(
-    r"(pytest|python\s+-m\s+pytest|tox|make\s+test|unittest|nosetests|"
-    r"python\s+tests?/|python\s+-m\s+unittest)", re.IGNORECASE)
+    r"(pytest|python3?\s+-m\s+pytest|tox|make\s+test|unittest|nosetests|"
+    r"python3?\s+tests?/|python3?\s+-m\s+unittest|"
+    r"bash\s+\S*(?:selftest|validate|check))", re.IGNORECASE)
 _PYTHON_VERSION_RE = re.compile(
     r"python-version:\s*['\"]?[\d.]+['\"]?", re.IGNORECASE)
 
