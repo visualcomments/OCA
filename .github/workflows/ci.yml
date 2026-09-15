@@ -28,6 +28,18 @@ jobs:
       - name: Regression suite
         run: python tests/test_scanner.py
 
+      - name: Regression suite without PyYAML
+        # CI installs no third-party packages, so config parsing takes the
+        # minimal-parser branch. That branch first crashed CI:
+        #   AttributeError: 'NoneType' object has no attribute 'values'
+        # on a `.oca.yml` with nested `weights:`. This step blocks the import
+        # and re-runs the suite so the no-PyYAML path is tested for real.
+        run: |
+          mkdir -p /tmp/noyaml
+          printf 'raise ImportError("PyYAML is not installed (CI)")\n' \
+            > /tmp/noyaml/yaml.py
+          PYTHONPATH=/tmp/noyaml python tests/test_scanner.py
+
       - name: Scanner is deterministic on its own fixtures
         run: |
           python -m oca.cli scan tests/fixtures/numbered-md --json -o /tmp/a.json

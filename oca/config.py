@@ -78,11 +78,20 @@ def load_config(root: Path) -> dict[str, Any]:
             pass  # Malformed config is silently ignored
         break
 
-    # Validate weights sum to ~1.0
-    w = config.get("weights", {})
-    total = sum(w.values())
-    if abs(total - 1.0) > 0.01:
+    # Validate weights sum to ~1.0. `weights` may be absent, null (`weights:`
+    # with nothing under it), or a non-mapping from a hand-written file; all
+    # three used to reach `sum(w.values())` and crash the whole scan with an
+    # AttributeError, so the type is checked before the values are read.
+    w = config.get("weights")
+    if not isinstance(w, dict) or not w:
         config["weights"] = DEFAULTS["weights"]
+    else:
+        try:
+            total = sum(float(v) for v in w.values())
+        except (TypeError, ValueError):
+            total = 0.0
+        if abs(total - 1.0) > 0.01:
+            config["weights"] = DEFAULTS["weights"]
 
     return config
 
@@ -99,35 +108,92 @@ def _merge(base: dict, override: dict) -> None:
 def _parse_simple_yaml(text: str) -> dict:
     """Minimal YAML parser for when PyYAML is not installed.
 
-    Handles flat key: value pairs and simple lists (- item).
-    Not a full YAML parser — just enough for typical .oca.yml files.
+    Handles flat key: value pairs, one level of nesting, and simple lists
+    (- item). Not a full YAML parser — just enough for typical .oca.yml files.
+
+    Nesting matters: the fallback is what runs when PyYAML is absent, and the
+    documented config format nests `weights:` and `disabled_checkers:` under
+    their keys. The first version of this function only understood flat pairs,
+    so `weights:` became `None` and the five axis weights leaked out as
+    top-level keys — which then crashed the weights check downstream.
     """
     result: dict[str, Any] = {}
-    current_key = None
+    current_key: str | None = None
     current_list: list[str] | None = None
+    # Keys that actually received a nested block. A key left as an empty
+    # mapping because nothing followed it is a null in real YAML, not `{}`.
+    filled: set[str] = set()
 
-    for line in text.splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
+    for raw in text.splitlines():
+        if not raw.strip() or raw.lstrip().startswith("#"):
             continue
+        indent = len(raw) - len(raw.lstrip())
+        stripped = raw.strip()
+
+        # A comment runs from a `#` that follows whitespace (YAML's rule),
+        # so URLs and `#` inside values survive.
+        if " #" in stripped:
+            stripped = stripped.split(" #", 1)[0].rstrip()
+            if not stripped:
+                continue
+
+        if indent == 0:
+            # A new top-level key ends whatever nested block was open.
+            current_list = None
+            current_key = None
+
         if stripped.startswith("- ") and current_key:
             if current_list is None:
                 current_list = []
-                result[current_key] = current_list
+                parent = result.get(current_key)
+                if not isinstance(parent, list):
+                    # The parent was created as a placeholder mapping (or is
+                    # absent); a list wins because the file used list syntax.
+                    parent = []
+                    result[current_key] = parent
+                current_list = parent
             current_list.append(stripped[2:].strip())
-        elif ":" in stripped:
-            key, _, value = stripped.partition(":")
-            key = key.strip()
-            value = value.strip()
+            filled.add(current_key)
+            continue
+
+        if ":" not in stripped:
+            continue
+
+        key, _, value = stripped.partition(":")
+        key = key.strip()
+        value = value.strip()
+
+        if indent == 0:
             current_key = key
             current_list = None
             if value:
-                # Try to parse as number
-                try:
-                    result[key] = float(value) if "." in value else int(value)
-                except ValueError:
-                    result[key] = value
+                result[key] = _scalar(value)
             else:
-                result[key] = None
+                # Unknown whether a nested block or a null follows; start a
+                # mapping and let a later "- item" line replace it with a list.
+                result[key] = {}
+        else:
+            parent = result.get(current_key)
+            if not isinstance(parent, dict):
+                parent = {}
+                if current_key:
+                    result[current_key] = parent
+            parent[key] = _scalar(value) if value else {}
+            if current_key:
+                filled.add(current_key)
+
+    for key, value in list(result.items()):
+        if isinstance(value, dict) and not value and key not in filled:
+            result[key] = None
 
     return result
+
+
+def _scalar(value: str) -> Any:
+    """Parse a YAML scalar the simple way: number if it looks like one."""
+    try:
+        return float(value) if "." in value else int(value)
+    except ValueError:
+        if value.lower() in ("true", "false"):
+            return value.lower() == "true"
+        return value

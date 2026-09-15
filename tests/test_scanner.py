@@ -926,6 +926,65 @@ def main() -> int:
         check("python3 + bash selftest counts as tests",
               "ci-no-tests" not in codes, str(codes))
 
+    # ── 29. конфиг работает без PyYAML (профиль CI) ─────────────────────
+    # CI does not install PyYAML, so config falls back to the minimal parser.
+    # The first run of that fallback crashed with
+    #   AttributeError: 'NoneType' object has no attribute 'values'
+    # because `weights:` (nested) became None and the axis weights leaked to
+    # the top level. These checks pin both the parser fallback and the
+    # weights guard under the no-PyYAML profile.
+    print("\n[config works without PyYAML]")
+    from oca import config as oca_config
+
+    def parse_without_yaml(text: str) -> dict:
+        return oca_config._parse_simple_yaml(text)
+
+    weight_yaml = (
+        "weights:\n"
+        "  structure: 0.30\n"
+        "  content: 0.20\n"
+        "  practice: 0.20\n"
+        "  reproducibility: 0.15\n"
+        "  licensing: 0.10\n"
+        "  agent_readiness: 0.05\n")
+    mini = parse_without_yaml(weight_yaml)
+    check("minimal parser nests weights under their key",
+          isinstance(mini.get("weights"), dict)
+          and mini["weights"].get("structure") == 0.30
+          and "structure" not in mini,
+          str(mini))
+    check("minimal parser turns a number scalar into a number",
+          mini["weights"]["structure"] == 0.30
+          and mini["weights"]["agent_readiness"] == 0.05,
+          str(mini["weights"]))
+    check("minimal parser keeps top-level keys and a nested list",
+          parse_without_yaml(
+              "lesson_target: 4\ndisabled_checkers:\n  - testing\n"
+          ) == {"lesson_target": 4, "disabled_checkers": ["testing"]},
+          str(parse_without_yaml("lesson_target: 4\ndisabled_checkers:\n  - testing\n")))
+    check("minimal parser treats an empty nested key as null, like YAML",
+          parse_without_yaml("weights:\n") == {"weights": None},
+          str(parse_without_yaml("weights:\n")))
+
+    # The railroad that actually broke on CI: .oca.yml with only a weights
+    # map, parsed by load_config() without PyYAML.
+    for config_text in (weight_yaml, "weights:\n"):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            for rel, body in COURSE.items():
+                p = root / rel
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text(body, encoding="utf-8")
+            (root / ".oca.yml").write_text(config_text, encoding="utf-8")
+            res = oca_scan.scan(root)   # must not raise AttributeError
+            weights = res["scores"]["weights"]
+        if "structure: 0.30" in config_text:
+            check("valid nested weights reach the score without PyYAML",
+                  weights["structure"] == 0.30, str(weights))
+        else:
+            check("a null weights block falls back to defaults safely",
+                  weights == oca_config.DEFAULTS["weights"], str(weights))
+
     print(f"\n{_passed} passed, {len(_failures)} failed")
     if _failures:
         for f in _failures:
