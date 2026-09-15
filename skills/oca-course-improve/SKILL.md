@@ -32,18 +32,19 @@ whenToUse: Есть результаты аудита курса (oca-report.md)
 | Артефакт | Источник правды | Шаблон |
 |---|---|---|
 | `LICENSE` | выбор пользователя | MIT / Apache-2.0 / BSD-3 / CC BY-SA |
-| `LICENSE-CONTENT` | тип контента | `assets/templates/LICENSE-CONTENT.md` |
-| `syllabus.md` | существующие занятия | `assets/templates/syllabus.md.tpl` |
-| `syllabus.json` | `syllabus.md` | `assets/templates/syllabus.json.tpl` |
-| `AGENTS.md` | структура курса | `assets/templates/AGENTS.md.tpl` |
-| `CONTRIBUTING.md` | процесс правок | `assets/templates/CONTRIBUTING.md.tpl` |
-| Блок «Цели занятия» | текст занятия | `assets/templates/lecture-block.md.tpl` |
-| Блок «Критерии оценивания» | задания занятия | `assets/templates/rubric.md.tpl` |
+| `LICENSE-CONTENT` | тип контента | `oca/templates/LICENSE-CONTENT.md` |
+| `syllabus.md` | существующие занятия | `oca/templates/syllabus.md.tpl` |
+| `syllabus.json` | `syllabus.md` | генерируется вручную (шаблона нет) |
+| `AGENTS.md` | структура курса | `oca/templates/AGENTS.md.tpl` |
+| `CONTRIBUTING.md` | процесс правок | генерируется вручную (шаблона нет) |
+| Блок «Цели занятия» | текст занятия | `oca/templates/lecture-block.md.tpl` |
+| Блок «Критерии оценивания» | задания занятия | `oca/templates/rubric.md.tpl` |
 | `requirements.txt` | импорты в коде/ноутбуках | автогенерация |
-| `.github/workflows/ci.yml` | Makefile + окружение | `assets/templates/ci.yml.tpl` |
+| `.github/workflows/ci.yml` | Makefile + окружение | `oca/templates/ci.yml.tpl` |
 
-Шаблоны лежат в `assets/templates/`. Читай их перед генерацией —
-не сочиняй структуру заново.
+Шаблоны лежат в `oca/templates/` внутри пакета OCA. Скопировать их в курс
+целиком можно командой `oca templates <путь-к-курсу>`. Читай их перед
+генерацией — не сочиняй структуру заново.
 
 ## Порядок работы
 
@@ -51,7 +52,7 @@ whenToUse: Есть результаты аудита курса (oca-report.md)
 
 ```bash
 cat oca-report.md            # находки и приоритеты
-python3 <skill-dir>/../oca-course-audit/scripts/oca_scan.py . --json > /tmp/oca-before.json
+oca scan . --json > /tmp/oca-before.json
 ```
 
 Прочитай README, syllabus и 2–3 занятия — чтобы поймать стиль и терминологию.
@@ -72,8 +73,8 @@ python3 <skill-dir>/../oca-course-audit/scripts/oca_scan.py . --json > /tmp/oca-
 ### 4. Проверить дельту
 
 ```bash
-python3 <skill-dir>/../oca-course-audit/scripts/oca_scan.py . --json > /tmp/oca-after.json
-python3 <skill-dir>/scripts/oca_diff.py /tmp/oca-before.json /tmp/oca-after.json
+oca scan . --json > /tmp/oca-after.json
+oca diff /tmp/oca-before.json /tmp/oca-after.json
 ```
 
 Покажи: было → стало по каждой оси и какие находки закрыты.
