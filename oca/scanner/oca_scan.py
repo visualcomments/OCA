@@ -301,9 +301,9 @@ def check_links(files: list[Path], root: Path) -> dict:
 
 # ── main scan ───────────────────────────────────────────────────────────────
 
-def scan(root: Path) -> dict:
+def scan(root: Path, config: dict | None = None) -> dict:
     # Fail loudly on a bad path. Silently scoring a typo as a real course
-    # (an empty dir still scores ~1.0) would hide the mistake behind a
+    # (an empty dir still scores ~1.89) would hide the mistake behind a
     # plausible-looking number, which is worse than an error.
     root = Path(root)
     if not root.exists():
@@ -311,7 +311,21 @@ def scan(root: Path) -> dict:
     if not root.is_dir():
         raise NotADirectoryError(f"{root} не является директорией")
 
+    # Configuration is loaded from .oca.yml when the caller does not pass one.
+    # Without this the document described in README (weights, lesson_target,
+    # disabled_checkers, ignore_paths) was read by nothing: `load_config` was
+    # imported only by the tests, so a course author could tune thresholds in
+    # .oca.yml and see no effect at all.
+    if config is None:
+        from oca.config import load_config
+        config = load_config(root)
+    ignore_paths = [p.strip("/") for p in (config.get("ignore_paths") or []) if p]
+
     files = walk_files(root)
+    if ignore_paths:
+        files = [f for f in files
+                 if not any(rel(f, root) == ip or rel(f, root).startswith(ip + "/")
+                            for ip in ignore_paths)]
     flat = {rel(f, root): f for f in files}
     names_lower = {p.lower(): p for p in flat}
     # Sorted, not a bare set: set iteration order varies between processes
@@ -789,7 +803,12 @@ def scan(root: Path) -> dict:
                 "notebooks": len(nb_paths),
                 "markdown": sum(1 for p in flat if p.endswith(".md"))},
     )
+    disabled = set(config.get("disabled_checkers") or [])
     for checker_mod in discover_checkers():
+        # `disabled_checkers` skipped nothing before: the list was parsed and
+        # then ignored, so a course could not turn off a noisy check.
+        if checker_mod.__name__.rsplit(".", 1)[-1] in disabled:
+            continue
         try:
             for f in checker_mod.check(ctx):
                 add(f.level, f.code, f.message, f.path)
@@ -803,8 +822,9 @@ def scan(root: Path) -> dict:
         return (num / den) if den else 0.0
 
     # A course is not penalised for having fewer than 16 lessons: a 6-module
-    # workshop is a legitimate course. Scale on a soft target of 8.
-    LESSON_TARGET = 8
+    # workshop is a legitimate course. Scale on a soft target, overridable
+    # from `.oca.yml` so a short workshop is not measured against a semester.
+    LESSON_TARGET = max(1, int(config.get("lesson_target") or 8))
     n_lessons = len(lecture_files)
     # Signals are only measurable on lessons readable as text; PDF-only
     # lessons cannot be judged for objectives/sources, so they neither earn
@@ -889,8 +909,7 @@ def scan(root: Path) -> dict:
         "licensing": round(licensing, 2),
         "agent_readiness": round(agent_ready, 2),
     }
-    weights = {"structure": 0.25, "content": 0.20, "practice": 0.20,
-               "reproducibility": 0.15, "licensing": 0.10, "agent_readiness": 0.10}
+    weights = axis_weights(config)
     overall = round(sum(axes[k] * weights[k] for k in axes), 2)
 
     return {
@@ -942,7 +961,7 @@ def scan(root: Path) -> dict:
                            1.0 if license_files else (0.8 if all_license_artifacts else 0.0), 3),
                    }},
         "findings": findings,
-        "plan": build_plan(findings),
+        "plan": build_plan(findings, config=config),
         "findings_summary": {
             **{lvl: sum(1 for f in findings if f["level"] == lvl)
                for lvl in ("BLOCKER", "MAJOR", "MINOR")},
@@ -969,6 +988,39 @@ def graded_ratio(num: float, den: float, floor: float = 0.0) -> float:
     if not den:
         return 0.0
     return max(floor, min(1.0, num / den))
+
+
+# The single source of truth for axis weights. They used to be written out
+# twice in this module (scoring and plan building) and a third time in
+# oca/config.py, so changing a weight meant editing three places and hoping
+# they stayed in step.
+AXIS_WEIGHTS = {
+    "structure": 0.25,
+    "content": 0.20,
+    "practice": 0.20,
+    "reproducibility": 0.15,
+    "licensing": 0.10,
+    "agent_readiness": 0.10,
+}
+
+
+def axis_weights(config: dict | None = None) -> dict[str, float]:
+    """Axis weights, overridden by `.oca.yml` when it supplies a valid set.
+
+    The override must cover the same axes and still sum to 1.0; anything else
+    is a typo that would silently reweight the whole score, so it is ignored
+    in favour of the defaults.
+    """
+    override = (config or {}).get("weights") or {}
+    if not isinstance(override, dict) or set(override) != set(AXIS_WEIGHTS):
+        return dict(AXIS_WEIGHTS)
+    try:
+        values = {k: float(v) for k, v in override.items()}
+    except (TypeError, ValueError):
+        return dict(AXIS_WEIGHTS)
+    if abs(sum(values.values()) - 1.0) > 0.01:
+        return dict(AXIS_WEIGHTS)
+    return values
 
 
 def grade_env(env_files: list[str], flat: dict[str, Path], read_text_fn) -> tuple[float, dict]:
@@ -1205,7 +1257,8 @@ def annotate_findings(findings: list[dict]) -> list[dict]:
     return out
 
 
-def build_plan(findings: list[dict], scores: dict | None = None) -> list[dict]:
+def build_plan(findings: list[dict], scores: dict | None = None,
+               config: dict | None = None) -> list[dict]:
     """Order findings into an improvement plan by benefit per unit of effort.
 
     Sorting by severity alone gives a bad plan: it puts "write the missing
@@ -1218,8 +1271,7 @@ def build_plan(findings: list[dict], scores: dict | None = None) -> list[dict]:
     per-impact factor. Real gains depend on how much of the axis the finding
     actually blocks, which is why the report says "потенциал", not "даст".
     """
-    weights = {"structure": 0.25, "content": 0.20, "practice": 0.20,
-               "reproducibility": 0.15, "licensing": 0.10, "agent_readiness": 0.10}
+    weights = axis_weights(config)
     # How much of an axis's weight a fix of this impact can plausibly recover.
     impact_factor = {"blocking": 1.0, "high": 0.6, "medium": 0.3, "low": 0.1}
     # Rough cost in hours, used only to compare fixes against each other.

@@ -43,6 +43,8 @@ oca/
 
 ```yaml
 lesson_target: 4           # для коротких воркшопов
+ignore_paths:              # не сканировать эти пути
+  - vendor/
 disabled_checkers:         # отключить конкретные проверки
   - testing
 weights:                   # свои веса осей (сумма = 1.0)
@@ -53,6 +55,17 @@ weights:                   # свои веса осей (сумма = 1.0)
   licensing: 0.10
   agent_readiness: 0.05
 ```
+
+Конфигурация применяется командами `scan`, `report` и `linkcheck`. Явный
+файл можно указать флагом `--config`:
+
+```bash
+oca scan ./my-course --config path/to/oca.yml
+```
+
+Некорректные веса (не тот набор осей или сумма ≠ 1.0) игнорируются в пользу
+значений по умолчанию — опечатка в конфиге не должна молча перевешивать
+итоговую оценку.
 
 ### Сканирование по URL
 
@@ -268,9 +281,11 @@ pip install -e ".[docs]"
 oca scan ./my-course              # человекочитаемый отчёт
 oca scan ./my-course --quiet      # одна строка
 oca scan ./my-course --json -o before.json
+oca scan ./my-course --config cfg.yml   # явный файл конфигурации
 oca diff before.json after.json   # что изменилось после правок
 oca report ./my-course            # скелет oca-report.md
 oca templates ./my-course         # скопировать шаблоны артефактов
+oca linkcheck ./my-course         # проверить внешние ссылки (сеть, с кэшем)
 ```
 
 ## Шесть осей
@@ -320,6 +335,10 @@ cp -r skills/oca-course-audit ~/.dsh/profiles/web/skills/
 - **oca-course-audit** — провести аудит, выдать отчёт;
 - **oca-course-improve** — сгенерировать недостающие артефакты;
 - **oca-course-publish** — оформить улучшения как ветку и pull request.
+
+Скилы вызывают установленную команду `oca` (`pip install -e .`), поэтому
+пакет должен быть доступен в окружении агента. Критерии и формат отчёта
+лежат в `docs/`, шаблоны артефактов — в `oca/templates/`.
 
 ## Проверенные на практике уроки
 

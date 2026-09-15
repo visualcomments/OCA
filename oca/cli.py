@@ -1,10 +1,10 @@
 """OCA command-line interface.
 
-    oca scan   <repo|url> [--json] [--quiet]
+    oca scan   <repo|url> [--json] [--quiet] [--config FILE]
     oca diff   <before.json> <after.json>
     oca report <repo|url> [-o oca-report.md]
     oca linkcheck <repo> [--offline]
-    oca list-templates
+    oca templates [dest]
 
 The CLI is a thin wrapper: all real work happens in ``oca.scanner``.
 URLs are cloned into a temporary directory and scanned locally.
@@ -21,6 +21,7 @@ import tempfile
 from pathlib import Path
 
 from oca import __version__
+from oca.config import CONFIG_NAMES
 from oca.scanner import oca_diff, oca_scan
 from oca.scanner.oca_scan import IMPACT_LABELS, EFFORT_LABELS
 
@@ -53,6 +54,47 @@ def _resolve_path(path_str: str) -> tuple[Path, str | None]:
     return Path(path_str).expanduser().resolve(), None
 
 
+def _load_scan_config(root: Path, config_path: str | None) -> dict:
+    """Build the scan configuration for `root`.
+
+    `--config FILE` points at an explicit .oca.yml anywhere on disk;
+    otherwise the course root is searched for one. Both paths go through the
+    same loader, so the file format is identical either way.
+    """
+    from oca.config import load_config
+
+    if not config_path:
+        return load_config(root)
+    path = Path(config_path).expanduser().resolve()
+    if not path.is_file():
+        raise RuntimeError(f"Конфигурация не найдена: {path}")
+    # load_config() looks for a known filename inside a directory, so an
+    # explicit file is honoured by reading it from its own parent directory
+    # when the name matches, and parsed directly otherwise.
+    return load_config(path.parent) if path.name in CONFIG_NAMES else _parse_config_file(path)
+
+
+def _parse_config_file(path: Path) -> dict:
+    """Parse a config file with a non-canonical name."""
+    import json as _json
+
+    from oca.config import DEFAULTS, _merge, _parse_simple_yaml
+
+    config = json.loads(_json.dumps(DEFAULTS))
+    text = path.read_text(encoding="utf-8")
+    if path.suffix == ".json":
+        user = _json.loads(text)
+    else:
+        try:
+            import yaml
+            user = yaml.safe_load(text) or {}
+        except ImportError:
+            user = _parse_simple_yaml(text)
+    if isinstance(user, dict):
+        _merge(config, user)
+    return config
+
+
 def _cmd_scan(args: argparse.Namespace) -> int:
     root, cleanup = _resolve_path(args.path)
     try:
@@ -60,7 +102,8 @@ def _cmd_scan(args: argparse.Namespace) -> int:
             print(f"oca: {root} is not a directory", file=sys.stderr)
             return 2
 
-        result = oca_scan.scan(root)
+        config = _load_scan_config(root, args.config)
+        result = oca_scan.scan(root, config=config)
 
         if args.json:
             out = json.dumps(result, ensure_ascii=False, indent=2, default=str)
@@ -103,7 +146,7 @@ def _cmd_report(args: argparse.Namespace) -> int:
         print(f"oca: {root} is not a directory", file=sys.stderr)
         return 2
 
-    r = oca_scan.scan(root)
+    r = oca_scan.scan(root, config=_load_scan_config(root, args.config))
     s, a, fs = r["scores"], r["artifacts"], r["findings_summary"]
 
     L: list[str] = []
@@ -269,7 +312,9 @@ def _cmd_linkcheck(args: argparse.Namespace) -> int:
         print(f"oca: {root} is not a directory", file=sys.stderr)
         return 2
 
-    result = oca_scan.scan(root)
+    # Link collection must see exactly what `oca scan` sees, so the same
+    # configuration (ignore_paths in particular) is applied here too.
+    result = oca_scan.scan(root, config=_load_scan_config(root, args.config))
     external = result["links"].get("external", [])
     if not external:
         print("oca: внешних ссылок не найдено")
@@ -334,6 +379,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--json", action="store_true", help="machine-readable output")
     s.add_argument("--quiet", action="store_true", help="one-line summary")
     s.add_argument("-o", "--output", help="write output to a file")
+    s.add_argument("--config", help="explicit .oca.yml path (default: from the course root)")
     s.set_defaults(func=_cmd_scan)
 
     d = sub.add_parser("diff", help="compare two scan results")
@@ -344,6 +390,7 @@ def build_parser() -> argparse.ArgumentParser:
     r = sub.add_parser("report", help="generate a report skeleton")
     r.add_argument("path")
     r.add_argument("-o", "--output", help="output path (default: <repo>/oca-report.md)")
+    r.add_argument("--config", help="explicit .oca.yml path (default: from the course root)")
     r.set_defaults(func=_cmd_report)
 
     t = sub.add_parser("templates", help="list or copy artefact templates")
@@ -361,6 +408,7 @@ def build_parser() -> argparse.ArgumentParser:
                     help="answer from cache only, never touch the network")
     lc.add_argument("--json", action="store_true", help="machine-readable output")
     lc.add_argument("-o", "--output", help="write output to a file")
+    lc.add_argument("--config", help="explicit .oca.yml path (default: from the course root)")
     lc.set_defaults(func=_cmd_linkcheck)
 
     return p
