@@ -70,9 +70,53 @@ jobs:
           print("offline linkcheck: OK", rep["by_status"])
           PYEOF
 
+      - name: .oca.yml reaches the scanner
+        run: |
+          # The configuration file is only useful if it changes the result.
+          # Regression guard for the bug where load_config() was imported by
+          # the tests alone and scan() hardcoded its weights.
+          cat > /tmp/oca-custom.yml <<'YAMLEOF'
+          weights:
+            structure: 0.30
+            content: 0.20
+            practice: 0.20
+            reproducibility: 0.15
+            licensing: 0.10
+            agent_readiness: 0.05
+          YAMLEOF
+          python -m oca.cli scan tests/fixtures/numbered-md --json -o /tmp/base.json
+          python -m oca.cli scan tests/fixtures/numbered-md --json \
+            --config /tmp/oca-custom.yml -o /tmp/custom.json
+          python - <<'PYEOF'
+          import json
+          base = json.load(open("/tmp/base.json"))["scores"]
+          custom = json.load(open("/tmp/custom.json"))["scores"]
+          assert base["weights"]["structure"] == 0.25, base["weights"]
+          assert custom["weights"]["structure"] == 0.30, custom["weights"]
+          assert base["overall"] != custom["overall"], "config had no effect"
+          print("config reaches scanner: OK",
+                base["overall"], "->", custom["overall"])
+          PYEOF
+
       - name: CLI smoke test
         run: |
           python -m oca.cli --version
           python -m oca.cli templates | head
           python -m oca.cli report tests/fixtures/numbered-md -o /tmp/report.md
           test -s /tmp/report.md && echo "report generated: OK"
+          # Every path the shipped skills point at must exist. Branch names
+          # (oca/improve-<date>) are skipped: they are not filesystem paths.
+          python - <<'PYEOF'
+          import re, pathlib
+          missing = []
+          for skill in pathlib.Path("skills").glob("*/SKILL.md"):
+              text = skill.read_text(encoding="utf-8")
+              for ref in re.findall(r"`((?:oca|docs|scripts|assets)/[^`]+)`", text):
+                  if "<" in ref:          # placeholder, e.g. oca/improve-<date>
+                      continue
+                  target = ref.rstrip("/")
+                  if not pathlib.Path(target).exists():
+                      missing.append(f"{skill}: {ref}")
+          assert not missing, "skills point at missing paths:\n" + "\n".join(missing)
+          print("skill references resolve: OK")
+          PYEOF

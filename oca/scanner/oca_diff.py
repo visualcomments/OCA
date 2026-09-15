@@ -25,6 +25,33 @@ def load(path: str) -> dict:
     return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
+def instances(findings: list[dict]) -> dict:
+    """Expand findings into one record per affected file.
+
+    A grouped finding holds many file paths in `paths` while a single one
+    holds just `path`. To compare two scans honestly we expand BOTH sides into
+    one record per affected file: otherwise collapsing 431 notes into a single
+    group reads as "431 findings closed", which is false.
+
+    Exposed at module level (not nested inside `main`) so the property can be
+    tested directly.
+    """
+    out: dict[tuple, int] = {}
+    for f in findings:
+        paths = f.get("paths") or ([f["path"]] if f.get("path") else [""])
+        n = f.get("count", 1)
+        # A group's count may exceed its stored paths (paths are capped);
+        # keep the undistributed remainder under an empty-path key so the
+        # totals still match.
+        for p in paths:
+            key = (f["code"], p, f["message"])
+            out[key] = out.get(key, 0) + 1
+        if n > len(paths):
+            key = (f["code"], "", f["message"])
+            out[key] = out.get(key, 0) + (n - len(paths))
+    return out
+
+
 def main() -> int:
     if len(sys.argv) != 3:
         print(__doc__)
@@ -51,26 +78,6 @@ def main() -> int:
     af = after["findings_summary"]
     for lvl in ("BLOCKER", "MAJOR", "MINOR"):
         print(f"  {lvl:<8} {bf.get(lvl, 0):3d} → {af.get(lvl, 0):3d}")
-
-    # A grouped finding holds many file paths in `paths` while a single one
-    # holds just `path`. To compare two scans honestly we expand BOTH sides
-    # into one record per affected file: otherwise collapsing 431 notes into
-    # a single group reads as "431 findings closed", which is false.
-    def instances(findings: list[dict]) -> dict:
-        out: dict[tuple, int] = {}
-        for f in findings:
-            paths = f.get("paths") or ([f["path"]] if f.get("path") else [""])
-            n = f.get("count", 1)
-            # A group's count may exceed its stored paths (paths are capped);
-            # keep the undistributed remainder under an empty-path key so the
-            # totals still match.
-            for p in paths:
-                key = (f["code"], p, f["message"])
-                out[key] = out.get(key, 0) + 1
-            if n > len(paths):
-                key = (f["code"], "", f["message"])
-                out[key] = out.get(key, 0) + (n - len(paths))
-        return out
 
     bc_all, ac_all = instances(before["findings"]), instances(after["findings"])
 

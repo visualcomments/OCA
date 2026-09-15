@@ -10,6 +10,8 @@ corresponds to a defect that actually shipped once — that is the point.
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -554,6 +556,148 @@ def main() -> int:
         check("disabled_checkers is loaded",
               "testing" in cfg["disabled_checkers"], str(cfg["disabled_checkers"]))
 
+    # ── 27. конфигурация действительно влияет на скан ─────────────────────
+    # `load_config` used to be imported only by this test file: the scanner
+    # hardcoded its weights and thresholds, so a `.oca.yml` in the course
+    # changed nothing. These checks fail if that wiring is ever cut again.
+    print("\n[configuration reaches the scanner]")
+
+    COURSE = {
+        "README.md": "# Курс\n\n" + "описание. " * 40,
+        "lectures/01_t.md": "# Тема\n\n## Задания\n\nРешить.\n",
+        "lectures/02_t.md": "# Тема\n\n## Задания\n\nРешить.\n",
+        "src/main.py": "print('hello')\n",
+    }
+
+    def course_case(config_text: str | None) -> dict:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            for rel, body in COURSE.items():
+                p = root / rel
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text(body, encoding="utf-8")
+            if config_text is not None:
+                (root / ".oca.yml").write_text(config_text, encoding="utf-8")
+            return oca_scan.scan(root)
+
+    base = course_case(None)
+    check("default weights are the documented ones",
+          base["scores"]["weights"]["structure"] == 0.25,
+          str(base["scores"]["weights"]))
+
+    shifted = course_case(
+        "weights:\n"
+        "  structure: 0.30\n"
+        "  content: 0.20\n"
+        "  practice: 0.20\n"
+        "  reproducibility: 0.15\n"
+        "  licensing: 0.10\n"
+        "  agent_readiness: 0.05\n")
+    check("custom weights reach the score",
+          shifted["scores"]["weights"]["structure"] == 0.30
+          and shifted["scores"]["weights"]["agent_readiness"] == 0.05,
+          str(shifted["scores"]["weights"]))
+    check("custom weights change the overall score",
+          shifted["scores"]["overall"] != base["scores"]["overall"],
+          f"{base['scores']['overall']} vs {shifted['scores']['overall']}")
+    check("weights that do not sum to 1.0 are ignored",
+          course_case(
+              "weights:\n  structure: 0.90\n  content: 0.90\n"
+              "  practice: 0.90\n  reproducibility: 0.90\n"
+              "  licensing: 0.90\n  agent_readiness: 0.90\n"
+          )["scores"]["weights"] == base["scores"]["weights"],
+          "invalid weights were accepted")
+
+    no_tests = [f["code"] for f in base["findings"] if f["code"] == "no-tests"]
+    check("the testing checker fires by default", "no-tests" in no_tests, str(no_tests))
+
+    muted = course_case("disabled_checkers:\n  - testing\n")
+    muted_codes = [f["code"] for f in muted["findings"] if f["code"] == "no-tests"]
+    check("disabled_checkers switches a checker off",
+          not muted_codes, f"still reported: {muted_codes}")
+
+    ignored = course_case("ignore_paths:\n  - src\n")
+    ignored_codes = [f["code"] for f in ignored["findings"] if f["code"] == "no-tests"]
+    check("ignore_paths hides files from the scan",
+          not ignored_codes, f"src/ was still scanned: {ignored_codes}")
+
+    check("lesson_target is honoured from the config",
+          course_case("lesson_target: 2\n")["scores"]["axes"]["structure"]
+          > base["scores"]["axes"]["structure"],
+          "a lower lesson_target did not raise the structure score")
+
+    # ── 28. oca_diff compares two scans honestly ─────────────────────────
+    # oca_diff.py had no tests at all, so the one property that matters --
+    # that a collapsed group of N findings does not read as N closed
+    # findings -- was only asserted in prose.
+    print("\n[oca diff]")
+    from oca.scanner import oca_diff
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        (root / "README.md").write_text("# Курс\n\n" + "описание. " * 40, encoding="utf-8")
+        (root / "lectures").mkdir()
+        for i in range(1, 3):
+            (root / "lectures" / f"0{i}_t.md").write_text(
+                f"# Тема {i}\n\n## Задания\n\nРешить.\n", encoding="utf-8")
+        # Three identical messy notebooks: the identical message is what makes
+        # notebook-hygiene a GROUP_CODES entry, so the scan stores ONE record
+        # with count=3 instead of three records.
+        messy = {"cells": [{"cell_type": "code", "execution_count": None,
+                            "outputs": [], "metadata": {}, "source": ["x = 1"]}],
+                 "metadata": {}, "nbformat": 4, "nbformat_minor": 5}
+        for i in range(3):
+            (root / f"nb{i}.ipynb").write_text(json.dumps(messy), encoding="utf-8")
+        before = oca_scan.scan(root)
+
+        # Fix all three: the collapsed group must disappear entirely, and the
+        # number of closed INSTANCES must be three, not one.
+        for i in range(3):
+            (root / f"nb{i}.ipynb").unlink()
+        after = oca_scan.scan(root)
+
+    before_json = json.loads(json.dumps(before, default=str))
+    after_json = json.loads(json.dumps(after, default=str))
+
+    b_hyg = [f for f in before_json["findings"] if f["code"] == "notebook-hygiene"]
+    # Three identical notebooks produce two distinct messages (never executed,
+    # no markdown cells), so two collapsed records of count=3 each -- not
+    # three records, and not one.
+    check("diff fixture collapses repeated findings into few records",
+          len(b_hyg) < 6 and all(f.get("count", 1) >= 3 for f in b_hyg),
+          str([(f["code"], f.get("count"), f["message"][:40]) for f in b_hyg]))
+    check("collapsed records keep every affected path",
+          all(len(f.get("paths") or []) >= 3 for f in b_hyg),
+          str([len(f.get("paths") or []) for f in b_hyg]))
+
+    b_inst = oca_diff.instances(before_json["findings"])
+    a_inst = oca_diff.instances(after_json["findings"])
+    closed = b_inst.keys() - a_inst.keys()
+    closed_hyg = sum(b_inst[k] for k in closed if k[0] == "notebook-hygiene")
+    check("a collapsed group is not counted as a single closed finding",
+          closed_hyg >= 3, f"closed notebook-hygiene instances={closed_hyg}")
+    check("every collapsed instance is accounted for",
+          sum(b_inst[k] for k in closed) >= 3,
+          f"closed instances={sum(b_inst[k] for k in closed)}")
+
+    # And the CLI entry point runs end to end on two real files.
+    with tempfile.TemporaryDirectory() as td:
+        p1, p2 = Path(td) / "a.json", Path(td) / "b.json"
+        p1.write_text(json.dumps(before_json, ensure_ascii=False), encoding="utf-8")
+        p2.write_text(json.dumps(after_json, ensure_ascii=False), encoding="utf-8")
+        saved = sys.argv
+        try:
+            sys.argv = ["oca_diff", str(p1), str(p2)]
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = oca_diff.main()
+        finally:
+            sys.argv = saved
+        text = out.getvalue()
+    check("oca diff exits cleanly", rc == 0, f"rc={rc}")
+    check("oca diff prints the overall delta",
+          "ИТОГО" in text and "→" in text, text[:120])
+    check("oca diff reports the volume change", "Объём:" in text, text[-200:])
 
     # ── 19. руководства шагов не считаются занятиями ─────────────────────
     print("\n[guide steps are not lessons]")
